@@ -4,6 +4,7 @@
   "version": "0.1.1",
   "description": "Impulse Minecraft Forge launcher",
   "author": "Impulse",
+  "license": "SEE LICENSE IN ../LICENSE.md",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
