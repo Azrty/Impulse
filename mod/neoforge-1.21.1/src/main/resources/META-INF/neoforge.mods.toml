@@ -1,0 +1,24 @@
+modLoader="javafml"
+loaderVersion="[1,)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="impulse"
+version="${version}"
+displayName="Impulse"
+displayTest="IGNORE_SERVER_VERSION"
+description="Serves Impulse launcher manifests and server mod files."
+
+[[dependencies.impulse]]
+modId="neoforge"
+type="required"
+versionRange="[21.1.243,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.impulse]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1,1.22)"
+ordering="NONE"
+side="BOTH"

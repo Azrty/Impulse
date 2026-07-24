@@ -1,0 +1,6 @@
+app/node_modules/
+app/dist/
+app/dist_electron/
+mod/.gradle/
+mod/**/.gradle/
+mod/**/build/

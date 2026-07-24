@@ -1,0 +1,417 @@
+package com.impulse.forge120;
+
+import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.vertex.BufferBuilder;
+import com.mojang.blaze3d.vertex.DefaultVertexFormat;
+import com.mojang.blaze3d.vertex.Tesselator;
+import com.mojang.blaze3d.vertex.VertexFormat;
+import net.minecraft.ChatFormatting;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.screens.ConnectScreen;
+import net.minecraft.client.gui.screens.OptionsScreen;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen;
+import net.minecraft.client.multiplayer.ServerData;
+import net.minecraft.client.multiplayer.resolver.ServerAddress;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraftforge.client.event.ScreenEvent;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.TickEvent;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+
+import java.io.InputStream;
+import java.util.Locale;
+import java.util.Properties;
+
+public final class ImpulseClient120 {
+    private static boolean autoConnectConsumed;
+
+    private ImpulseClient120() {
+    }
+
+    public static void register() {
+        MinecraftForge.EVENT_BUS.register(new ImpulseClient120());
+    }
+
+    @SubscribeEvent
+    public void onScreenOpening(ScreenEvent.Opening event) {
+        if (!isImpulseLaunch() || !menuEnabled()) return;
+        if (event.getNewScreen() instanceof TitleScreen || event.getNewScreen() instanceof JoinMultiplayerScreen) {
+            if (!(event.getNewScreen() instanceof ClassicImpulseScreen)) {
+                event.setNewScreen(menuScreen());
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public void onClientTick(TickEvent.ClientTickEvent event) {
+        if (!isImpulseLaunch() || !menuEnabled() || event.phase != TickEvent.Phase.END) return;
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.screen instanceof JoinMultiplayerScreen || (minecraft.screen instanceof TitleScreen && !(minecraft.screen instanceof ClassicImpulseScreen))) {
+            minecraft.setScreen(menuScreen());
+        }
+    }
+
+    private static boolean isImpulseLaunch() {
+        return Boolean.parseBoolean(System.getProperty("impulse.client", "false"));
+    }
+
+    private static String address() {
+        return System.getProperty("impulse.server.address", "").trim();
+    }
+
+    private static int port() {
+        try {
+            return Integer.parseInt(System.getProperty("impulse.server.port", "25565").trim());
+        } catch (Exception ignored) {
+            return 25565;
+        }
+    }
+
+    private static boolean menuEnabled() {
+        return Boolean.parseBoolean(System.getProperty("impulse.menu.enabled", "true"));
+    }
+
+    private static boolean classicMenu() {
+        return "classic".equalsIgnoreCase(System.getProperty("impulse.menu.skin", "default").trim());
+    }
+
+    private static String menuTitle() {
+        return stringProperty("impulse.menu.title", "IMPULSE");
+    }
+
+    private static String menuSubtitle() {
+        return stringProperty("impulse.menu.subtitle", "A focused way into your server");
+    }
+
+    private static String serverName() {
+        return stringProperty("impulse.server.name", "Impulse Server");
+    }
+
+    private static boolean hideServerNameFromPlayButton() {
+        return Boolean.parseBoolean(System.getProperty("impulse.menu.hide_server_name_from_play_button",
+            System.getProperty("impulse.menu.hideServerNameFromPlayButton", "false")));
+    }
+
+    private static String stringProperty(String key, String fallback) {
+        String value = System.getProperty(key, "").trim();
+        return value.length() == 0 ? fallback : value;
+    }
+
+    private static boolean shouldAutoConnect() {
+        if (!Boolean.parseBoolean(System.getProperty("impulse.auto_connect", "false"))) return false;
+        if (autoConnectConsumed) return false;
+        autoConnectConsumed = true;
+        return true;
+    }
+
+    private static Screen menuScreen() {
+        return classicMenu() ? new ClassicImpulseScreen() : new ImpulseScreen();
+    }
+
+    private static final class ImpulseScreen extends Screen {
+        private static final ResourceLocation LOGO = new ResourceLocation("impulse", "textures/gui/menu/logo.png");
+
+        private int frames = 720;
+        private int fps = 24;
+        private long openedAt;
+        private String error;
+        private int ticksOpen;
+
+        private ImpulseScreen() {
+            super(Component.literal("Impulse"));
+            this.openedAt = System.currentTimeMillis();
+            loadMenuProperties();
+        }
+
+        protected void init() {
+            int buttonWidth = 220;
+            int buttonHeight = 32;
+            int buttonGap = 42;
+            int startY = buttonStartY(buttonHeight, buttonGap);
+            this.addRenderableWidget(new ImpulseButton(this.width / 2 - buttonWidth / 2, startY, buttonWidth, buttonHeight, playComponent(), true, new Button.OnPress() {
+                public void onPress(Button button) {
+                    connect();
+                }
+            }));
+            this.addRenderableWidget(new ImpulseButton(this.width / 2 - buttonWidth / 2, startY + buttonGap, buttonWidth, buttonHeight, Component.literal("Options"), false, new Button.OnPress() {
+                public void onPress(Button button) {
+                    Minecraft minecraft = Minecraft.getInstance();
+                    minecraft.setScreen(new OptionsScreen(ImpulseScreen.this, minecraft.options));
+                }
+            }));
+        }
+
+        private void connect() {
+            String host = address();
+            if (host.length() == 0) {
+                this.error = "No Impulse server address was provided by the launcher.";
+                return;
+            }
+            this.error = null;
+            int serverPort = port();
+            String serverIp = host + ":" + serverPort;
+            Minecraft minecraft = Minecraft.getInstance();
+            ServerData serverData = new ServerData("Impulse", serverIp, false);
+            ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(serverIp), serverData, false);
+        }
+
+        public void tick() {
+            this.ticksOpen++;
+            if (this.ticksOpen > 2 && shouldAutoConnect()) {
+                connect();
+            }
+        }
+
+        public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+            if (classicMenu()) {
+                renderClassic(graphics, mouseX, mouseY, partialTick);
+                return;
+            }
+            int startY = buttonStartY(32, 42);
+            int sloganY = Math.min(Math.max(120, this.height / 2 - 36), startY - 32);
+            sloganY = Math.max(62, sloganY);
+            int titleY = Math.min(Math.max(72, this.height / 2 - 96), sloganY - 48);
+            titleY = Math.max(34, titleY);
+            drawAnimatedBackground();
+            graphics.fillGradient(0, 0, this.width, this.height, 0x66000000, 0xDD000000);
+            drawLogo(titleY);
+            drawScaledCentered(graphics, menuTitle(), this.width / 2, titleY, titleScale(menuTitle()), 0xFFFFFFFF);
+            graphics.drawCenteredString(this.font, menuSubtitle(), this.width / 2, sloganY, 0xC8FFFFFF);
+            if (this.error != null) {
+                graphics.drawCenteredString(this.font, this.error, this.width / 2, Math.min(startY - 14, sloganY + 20), 0xFFFFB8B8);
+            }
+            super.render(graphics, mouseX, mouseY, partialTick);
+        }
+
+        private void renderClassic(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+            int startY = buttonStartY(32, 42);
+            drawClassicBackground(graphics);
+            int logoSize = Math.min(42, Math.max(28, this.height / 14));
+            int logoY = Math.max(12, this.height / 8 - 16);
+            drawTexture(LOGO, this.width / 2 - logoSize / 2, logoY, logoSize, logoSize);
+            int titleY = logoY + logoSize + 12;
+            drawScaledCentered(graphics, menuTitle(), this.width / 2, titleY, Math.min(2.0F, titleScale(menuTitle())), 0xFFFFFFFF);
+            graphics.drawCenteredString(this.font, menuSubtitle(), this.width / 2, titleY + 30, 0xFFCFCFCF);
+            if (this.error != null) {
+                graphics.drawCenteredString(this.font, this.error, this.width / 2, Math.max(titleY + 46, startY - 14), 0xFFFFB8B8);
+            }
+            super.render(graphics, mouseX, mouseY, partialTick);
+        }
+
+        public boolean isPauseScreen() {
+            return false;
+        }
+
+        private void loadMenuProperties() {
+            InputStream input = null;
+            try {
+                input = Minecraft.getInstance().getResourceManager().open(new ResourceLocation("impulse", "menu.properties"));
+                Properties props = new Properties();
+                props.load(input);
+                this.frames = Math.max(1, Integer.parseInt(props.getProperty("frames", "720").trim()));
+                this.fps = Math.max(1, Integer.parseInt(props.getProperty("fps", "24").trim()));
+            } catch (Exception ignored) {
+                this.frames = 720;
+                this.fps = 24;
+            } finally {
+                if (input != null) {
+                    try {
+                        input.close();
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        }
+
+        private void drawAnimatedBackground() {
+            int frame = (int) (((System.currentTimeMillis() - this.openedAt) * this.fps / 1000L) % this.frames);
+            drawCoverTexture(new ResourceLocation("impulse", String.format(Locale.US, "textures/gui/menu/bg_%03d.jpg", frame)));
+        }
+
+        private void drawClassicBackground(GuiGraphics graphics) {
+            graphics.fillGradient(0, 0, this.width, this.height, 0xFF2A2A2A, 0xFF0E0E0E);
+            int tile = 32;
+            for (int y = 0; y < this.height; y += tile) {
+                for (int x = 0; x < this.width; x += tile) {
+                    int color = (((x / tile) + (y / tile)) & 1) == 0 ? 0x18000000 : 0x08000000;
+                    graphics.fill(x, y, Math.min(x + tile, this.width), Math.min(y + tile, this.height), color);
+                }
+            }
+            graphics.fillGradient(0, 0, this.width, this.height, 0x22000000, 0xB8000000);
+        }
+
+        private void drawCoverTexture(ResourceLocation texture) {
+            double textureRatio = 16.0D / 9.0D;
+            double screenRatio = (double) this.width / (double) this.height;
+            int drawWidth = this.width;
+            int drawHeight = this.height;
+            int x = 0;
+            int y = 0;
+            if (screenRatio > textureRatio) {
+                drawHeight = (int) Math.ceil(this.width / textureRatio);
+                y = (this.height - drawHeight) / 2;
+            } else {
+                drawWidth = (int) Math.ceil(this.height * textureRatio);
+                x = (this.width - drawWidth) / 2;
+            }
+            drawTexture(texture, x, y, drawWidth, drawHeight);
+        }
+
+        private int buttonStartY(int buttonHeight, int buttonGap) {
+            if (classicMenu()) {
+                int desired = this.height / 4 + 96;
+                int maxStart = this.height - buttonGap - buttonHeight - 18;
+                return Math.max(104, Math.min(desired, maxStart));
+            }
+            int desired = Math.max(176, this.height / 2 + 48);
+            int maxStart = this.height - buttonGap - buttonHeight - 14;
+            return Math.max(88, Math.min(desired, maxStart));
+        }
+
+        private void drawLogo(int titleY) {
+            if (titleY < 70) return;
+            int size = Math.min(92, Math.max(48, this.height / 8));
+            int y = Math.max(14, titleY - size - 24);
+            drawTexture(LOGO, this.width / 2 - size / 2, y, size, size);
+        }
+
+        private void drawTexture(ResourceLocation texture, int x, int y, int drawWidth, int drawHeight) {
+            RenderSystem.setShaderTexture(0, texture);
+            BufferBuilder buffer = Tesselator.getInstance().getBuilder();
+            buffer.begin(VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_TEX);
+            buffer.vertex(x, y + drawHeight, 0).uv(0, 1).endVertex();
+            buffer.vertex(x + drawWidth, y + drawHeight, 0).uv(1, 1).endVertex();
+            buffer.vertex(x + drawWidth, y, 0).uv(1, 0).endVertex();
+            buffer.vertex(x, y, 0).uv(0, 0).endVertex();
+            Tesselator.getInstance().end();
+        }
+
+        private void drawScaledCentered(GuiGraphics graphics, String text, int centerX, int y, float scale, int color) {
+            graphics.pose().pushPose();
+            graphics.pose().scale(scale, scale, 1.0F);
+            int scaledX = (int) ((centerX - this.font.width(text) * scale / 2.0F) / scale);
+            graphics.drawString(this.font, text, scaledX, (int) (y / scale), color, false);
+            graphics.pose().popPose();
+        }
+
+        private float titleScale(String text) {
+            int available = Math.max(80, this.width - 48);
+            float desired = 3.2F;
+            int textWidth = Math.max(1, this.font.width(text));
+            return Math.max(1.2F, Math.min(desired, (float) available / (float) textWidth));
+        }
+
+        private Component playComponent() {
+            if (hideServerNameFromPlayButton()) return Component.literal("Play");
+            return Component.literal("Play ").append(Component.literal(serverName()).withStyle(ChatFormatting.BOLD));
+        }
+    }
+
+    private static final class ClassicImpulseScreen extends TitleScreen {
+        private static final ResourceLocation LOGO = new ResourceLocation("impulse", "textures/gui/menu/logo.png");
+        private String error;
+        private int ticksOpen;
+
+        protected void init() {
+            super.init();
+            this.clearWidgets();
+            int buttonWidth = 200;
+            int buttonHeight = 20;
+            int startY = this.height / 4 + 72;
+            this.addRenderableWidget(new ClassicButton(this.width / 2 - buttonWidth / 2, startY, buttonWidth, buttonHeight, playComponent(), new Button.OnPress() {
+                public void onPress(Button button) {
+                    connect();
+                }
+            }));
+            this.addRenderableWidget(new ClassicButton(this.width / 2 - buttonWidth / 2, startY + 24, buttonWidth, buttonHeight, Component.literal("Options"), new Button.OnPress() {
+                public void onPress(Button button) {
+                    Minecraft minecraft = Minecraft.getInstance();
+                    minecraft.setScreen(new OptionsScreen(ClassicImpulseScreen.this, minecraft.options));
+                }
+            }));
+        }
+
+        public void tick() {
+            super.tick();
+            this.ticksOpen++;
+            if (this.ticksOpen > 2 && shouldAutoConnect()) {
+                connect();
+            }
+        }
+
+        private void connect() {
+            String host = address();
+            if (host.length() == 0) {
+                this.error = "No Impulse server address was provided by the launcher.";
+                return;
+            }
+            this.error = null;
+            int serverPort = port();
+            String serverIp = host + ":" + serverPort;
+            Minecraft minecraft = Minecraft.getInstance();
+            ServerData serverData = new ServerData("Impulse", serverIp, false);
+            ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(serverIp), serverData, false);
+        }
+
+        public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+            super.render(graphics, mouseX, mouseY, partialTick);
+            graphics.blit(LOGO, 8, 8, 24, 24, 0.0F, 0.0F, 256, 256, 256, 256);
+            if (this.error != null) {
+                graphics.drawCenteredString(this.font, this.error, this.width / 2, this.height / 4 + 124, 0xFFFFB8B8);
+            }
+        }
+
+        public boolean isPauseScreen() {
+            return false;
+        }
+
+        private Component playComponent() {
+            if (hideServerNameFromPlayButton()) return Component.literal("Play");
+            return Component.literal("Play ").append(Component.literal(serverName()).withStyle(ChatFormatting.BOLD));
+        }
+    }
+
+    private static final class ClassicButton extends Button {
+        private ClassicButton(int x, int y, int width, int height, Component message, OnPress onPress) {
+            super(x, y, width, height, message, onPress, DEFAULT_NARRATION);
+        }
+    }
+
+    private static final class ImpulseButton extends Button {
+        private final boolean primary;
+
+        private ImpulseButton(int x, int y, int width, int height, Component message, boolean primary, OnPress onPress) {
+            super(x, y, width, height, message, onPress, DEFAULT_NARRATION);
+            this.primary = primary;
+        }
+
+        protected void renderWidget(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+            if (classicMenu()) {
+                int top = this.isHoveredOrFocused() ? 0xFF9A9A9A : 0xFF6F6F6F;
+                int bottom = this.isHoveredOrFocused() ? 0xFF777777 : 0xFF4C4C4C;
+                int text = this.isHoveredOrFocused() ? 0xFFFFFFA0 : 0xFFFFFFFF;
+                graphics.fillGradient(this.getX(), this.getY(), this.getX() + this.width, this.getY() + this.height, top, bottom);
+                graphics.fill(this.getX(), this.getY(), this.getX() + this.width, this.getY() + 1, 0xFFFFFFFF);
+                graphics.fill(this.getX(), this.getY(), this.getX() + 1, this.getY() + this.height, 0xFFFFFFFF);
+                graphics.fill(this.getX(), this.getY() + this.height - 1, this.getX() + this.width, this.getY() + this.height, 0xFF202020);
+                graphics.fill(this.getX() + this.width - 1, this.getY(), this.getX() + this.width, this.getY() + this.height, 0xFF202020);
+                graphics.drawCenteredString(Minecraft.getInstance().font, this.getMessage(), this.getX() + this.width / 2, this.getY() + (this.height - 8) / 2, text);
+                return;
+            }
+            int background = this.primary ? (this.isHoveredOrFocused() ? 0x8A000000 : 0x66000000) : (this.isHoveredOrFocused() ? 0x5C000000 : 0x38000000);
+            int border = this.primary ? (this.isHoveredOrFocused() ? 0xFFFFFFFF : 0xCCFFFFFF) : (this.isHoveredOrFocused() ? 0xAAFFFFFF : 0x66FFFFFF);
+            int text = 0xFFFFFFFF;
+            graphics.fill(this.getX(), this.getY(), this.getX() + this.width, this.getY() + this.height, background);
+            graphics.fill(this.getX(), this.getY(), this.getX() + this.width, this.getY() + 1, border);
+            graphics.fill(this.getX(), this.getY() + this.height - 1, this.getX() + this.width, this.getY() + this.height, border);
+            graphics.fill(this.getX(), this.getY(), this.getX() + 1, this.getY() + this.height, border);
+            graphics.fill(this.getX() + this.width - 1, this.getY(), this.getX() + this.width, this.getY() + this.height, border);
+            graphics.drawCenteredString(Minecraft.getInstance().font, this.getMessage(), this.getX() + this.width / 2, this.getY() + (this.height - 8) / 2, text);
+        }
+    }
+}

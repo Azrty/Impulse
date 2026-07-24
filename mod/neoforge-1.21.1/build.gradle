@@ -1,0 +1,51 @@
+buildscript {
+    repositories {
+        maven { url = 'https://maven.neoforged.net/releases' }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath 'net.neoforged.gradle:userdev:7.1.38'
+    }
+}
+
+apply plugin: 'java-library'
+apply plugin: 'net.neoforged.gradle.userdev'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+base {
+    archivesName = 'impulse-neoforge-1.21.1'
+}
+
+sourceSets.main.resources {
+    srcDir 'src/generated/resources'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'net.neoforged:neoforge:21.1.243'
+    implementation project(':common')
+}
+
+tasks.named('jar', Jar).configure {
+    from project(':common').sourceSets.main.output
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    inputs.property 'version', project.version
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand 'version': project.version
+    }
+}

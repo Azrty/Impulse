@@ -1,0 +1,122 @@
+{
+  "name": "impulse-launcher",
+  "private": true,
+  "version": "0.1.1",
+  "description": "Impulse Minecraft Forge launcher",
+  "author": "Impulse",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "prepare:menu-assets": "node scripts/prepare-menu-assets.cjs",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "electron:dev": "cross-env NODE_ENV=development concurrently \"vite\" \"wait-on http://localhost:5188 && electron .\"",
+    "electron:build": "tsc && vite build && electron-builder",
+    "electron:preview": "cross-env NODE_ENV=production electron .",
+    "build:mac": "node scripts/release-mac.mjs",
+    "build:windows": "node scripts/release-win.mjs",
+    "build:all": "node scripts/release-all.mjs"
+  },
+  "dependencies": {
+    "@xmcl/core": "^2.15.1",
+    "@xmcl/file-transfer": "^2.0.3",
+    "@xmcl/installer": "^6.1.2",
+    "@xmcl/user": "^4.3.0",
+    "adm-zip": "^0.5.16",
+    "axios": "^1.6.5",
+    "crypto-js": "^4.2.0",
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.8.9",
+    "framer-motion": "^10.16.5",
+    "lucide-react": "^0.344.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-player": "^2.14.1",
+    "undici": "^5.29.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1094.0",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@types/uuid": "^9.0.7",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.18",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^42.7.1",
+    "electron-builder": "^24.6.4",
+    "ffmpeg-static": "^5.3.0",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.5.3",
+    "vite": "^5.4.2",
+    "wait-on": "^9.1.0"
+  },
+    "build": {
+    "appId": "com.impulse.launcher",
+    "productName": "Impulse",
+    "icon": "assets/icon.png",
+    "directories": {
+      "output": "dist_electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "assets/**/*"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://impulse.epivalent.com"
+    },
+    "mac": {
+      "icon": "assets/icon.png",
+      "category": "public.app-category.games",
+      "notarize": false,
+      "artifactName": "impulse-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "icon": "assets/icon.png",
+      "artifactName": "setup-impulse-${version}-x64.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "target": "AppImage"
+    }
+  }
+}

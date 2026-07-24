@@ -1,0 +1,49 @@
+plugins {
+    id 'java'
+    id 'net.minecraftforge.gradle' version '[7.0.3,8)'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+base {
+    archivesName = 'impulse-forge-1.21.1'
+}
+
+sourceSets.main.resources {
+    srcDir 'src/generated/resources'
+}
+
+minecraft {
+    mappings channel: 'official', version: '1.21.1'
+}
+
+repositories {
+    minecraft.mavenizer(it)
+    maven fg.forgeMaven
+    maven fg.minecraftLibsMaven
+    mavenCentral()
+}
+
+dependencies {
+    implementation minecraft.dependency('net.minecraftforge:forge:1.21.1-52.1.16')
+    implementation project(':common')
+}
+
+tasks.named('jar', Jar).configure {
+    from project(':common').sourceSets.main.output
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    inputs.property 'version', project.version
+    filesMatching('META-INF/mods.toml') {
+        expand 'version': project.version
+    }
+}

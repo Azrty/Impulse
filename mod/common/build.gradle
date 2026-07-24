@@ -1,0 +1,17 @@
+plugins {
+    id 'java'
+}
+
+if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.version('5.0')) {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+} else {
+    java {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+}
+
+tasks.withType(JavaCompile).all {
+    options.encoding = 'UTF-8'
+}

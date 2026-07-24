@@ -1,0 +1,4 @@
+subprojects {
+    group = 'com.impulse'
+    version = '0.1.0'
+}

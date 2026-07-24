@@ -1,0 +1,41 @@
+buildscript {
+    repositories {
+        mavenCentral()
+        maven { name = 'forge'; url = 'https://maven.minecraftforge.net/' }
+        maven { name = 'sonatype'; url = 'https://oss.sonatype.org/content/repositories/snapshots/' }
+    }
+    dependencies {
+        classpath 'net.minecraftforge.gradle:ForgeGradle:2.3-SNAPSHOT'
+    }
+}
+
+apply plugin: 'net.minecraftforge.gradle.forge'
+
+sourceCompatibility = JavaVersion.VERSION_1_8
+targetCompatibility = JavaVersion.VERSION_1_8
+archivesBaseName = 'impulse-forge-1.12.2'
+
+minecraft {
+    version = '1.12.2-14.23.5.2847'
+    runDir = 'run'
+    mappings = 'stable_39'
+}
+
+dependencies {
+    compile project(':common')
+}
+
+jar {
+    from project(':common').sourceSets.main.output
+}
+
+processResources {
+    inputs.property 'version', project.version
+    from(sourceSets.main.resources.srcDirs) {
+        include 'mcmod.info'
+        expand 'version': project.version
+    }
+    from(sourceSets.main.resources.srcDirs) {
+        exclude 'mcmod.info'
+    }
+}

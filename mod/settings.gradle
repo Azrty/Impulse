@@ -1,0 +1,20 @@
+rootProject.name = 'impulse-forge-mod'
+
+def defaultTargets
+if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.version('3.0')) {
+    defaultTargets = 'forge-1.7.10'
+} else if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.version('5.0')) {
+    defaultTargets = 'forge-1.12.2'
+} else if (org.gradle.util.GradleVersion.current() >= org.gradle.util.GradleVersion.version('9.0')) {
+    defaultTargets = 'forge-1.21.1'
+} else {
+    defaultTargets = 'forge-1.20.1'
+}
+
+def requestedTargets = (settings.startParameter.projectProperties['impulseTargets'] ?: defaultTargets)
+    .split(',')
+    .collect { it.trim() }
+    .findAll { it }
+
+include 'common'
+requestedTargets.each { include it }
