@@ -15,6 +15,7 @@
     "electron:dev": "cross-env NODE_ENV=development concurrently \"vite\" \"wait-on http://localhost:5188 && electron .\"",
     "electron:build": "tsc && vite build && electron-builder",
     "electron:preview": "cross-env NODE_ENV=production electron .",
+    "bump": "node scripts/bump.mjs",
     "build:mac": "node scripts/release-mac.mjs",
     "build:windows": "node scripts/release-win.mjs",
     "build:all": "node scripts/release-all.mjs"
@@ -27,6 +28,7 @@
     "adm-zip": "^0.5.16",
     "axios": "^1.6.5",
     "crypto-js": "^4.2.0",
+    "discord-rpc": "^4.0.1",
     "electron-store": "^8.1.0",
     "electron-updater": "^6.8.9",
     "framer-motion": "^10.16.5",
@@ -56,7 +58,7 @@
     "vite": "^5.4.2",
     "wait-on": "^9.1.0"
   },
-    "build": {
+  "build": {
     "appId": "com.impulse.launcher",
     "productName": "Impulse",
     "icon": "assets/icon.png",
