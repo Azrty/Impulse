@@ -1,7 +1,7 @@
 {
   "name": "impulse-launcher",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.6",
   "description": "Impulse Minecraft Forge launcher",
   "author": "Impulse",
   "license": "SEE LICENSE IN ../LICENSE.md",
