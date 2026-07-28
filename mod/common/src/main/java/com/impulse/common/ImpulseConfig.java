@@ -25,6 +25,8 @@ public final class ImpulseConfig {
     public final String menuTitle;
     public final String menuSubtitle;
     public final boolean menuHideServerNameFromPlayButton;
+    public final boolean menuSingleplayerEnabled;
+    public final boolean menuMultiplayerEnabled;
     public final int manifestVersion;
     public final String iconUrl;
     public final String bannerUrl;
@@ -34,6 +36,7 @@ public final class ImpulseConfig {
     public final String bannerFile;
     public final String videoBackgroundFile;
     public final File modsDirectory;
+    public final File optionalModsDirectory;
     public final Set<String> excludedNames;
 
     private ImpulseConfig(Properties props, File configFile, File serverRoot) {
@@ -58,15 +61,24 @@ public final class ImpulseConfig {
             "hideServerNameFromPlayButton",
             "hideservernamefromplaybutton",
             "menu.hideservernamefromplaybutton");
+        this.menuSingleplayerEnabled = parseBooleanAlias(props, "singleplayerenabled", "false",
+            "singlePlayerEnabled",
+            "menu.singleplayerEnabled",
+            "menu.singleplayer_enabled");
+        this.menuMultiplayerEnabled = parseBooleanAlias(props, "multiplayerenabled", "false",
+            "multiPlayerEnabled",
+            "menu.multiplayerEnabled",
+            "menu.multiplayer_enabled");
         this.manifestVersion = parseInt(props.getProperty("manifest.version"), 1);
         this.iconUrl = cleanOptional(props.getProperty("media.iconUrl", ""));
         this.bannerUrl = cleanOptional(props.getProperty("media.bannerUrl", ""));
         this.videoBackgroundUrl = cleanOptional(props.getProperty("media.videoBackgroundUrl", ""));
-        this.mediaDirectory = resolve(serverRoot, props.getProperty("media.directory", "impulse-media"), "impulse-media");
+        this.mediaDirectory = resolve(serverRoot, props.getProperty("media.directory", "impulse/assets"), "impulse/assets");
         this.iconFile = cleanOptional(props.getProperty("media.iconFile", ""));
         this.bannerFile = cleanOptional(props.getProperty("media.bannerFile", ""));
         this.videoBackgroundFile = cleanOptional(props.getProperty("media.videoBackgroundFile", ""));
-        this.modsDirectory = resolve(serverRoot, props.getProperty("mods.directory", "mods"), "mods");
+        this.modsDirectory = resolve(serverRoot, props.getProperty("mods.directory", "impulse/mods"), "impulse/mods");
+        this.optionalModsDirectory = resolve(serverRoot, optionalModsDirectoryProperty(props), "impulse/optionnal_mods");
         this.excludedNames = parseExcludes(props.getProperty("mods.exclude", ""));
     }
 
@@ -86,7 +98,10 @@ public final class ImpulseConfig {
             } finally {
                 input.close();
             }
-            if (writeMissingDefaults(configFile, props, defaults(serverRoot, runtimeDefaults))) {
+            boolean migrated = migrateLegacyFolderDefaults(props);
+            boolean addedDefaults = addMissingDefaults(props, defaults(serverRoot, runtimeDefaults));
+            if (migrated || addedDefaults) {
+                writeProperties(configFile, props);
                 FileInputStream reloaded = new FileInputStream(configFile);
                 try {
                     props.clear();
@@ -103,7 +118,29 @@ public final class ImpulseConfig {
                 output.close();
             }
         }
-        return new ImpulseConfig(props, configFile, serverRoot);
+        ImpulseConfig config = new ImpulseConfig(props, configFile, serverRoot);
+        ensureImpulseDirectories(serverRoot, config);
+        return config;
+    }
+
+    private static boolean migrateLegacyFolderDefaults(Properties props) {
+        boolean changed = false;
+        changed = migrateLegacyValue(props, "mods.directory", "mods", "impulse/mods") || changed;
+        changed = migrateLegacyValue(props, "mods.directory", "Impulse/mods", "impulse/mods") || changed;
+        changed = migrateLegacyValue(props, "media.directory", "impulse-media", "impulse/assets") || changed;
+        changed = migrateLegacyValue(props, "media.directory", "Impulse/assets", "impulse/assets") || changed;
+        changed = migrateLegacyValue(props, "optionalmods.directory", "optionalmods", "impulse/optionnal_mods") || changed;
+        changed = migrateLegacyValue(props, "optionalmods.directory", "Impulse/optionnal_mods", "impulse/optionnal_mods") || changed;
+        return changed;
+    }
+
+    private static boolean migrateLegacyValue(Properties props, String key, String oldValue, String newValue) {
+        String value = props.getProperty(key);
+        if (value != null && oldValue.equals(value.trim())) {
+            props.setProperty(key, newValue);
+            return true;
+        }
+        return false;
     }
 
     private static Properties defaults(File serverRoot, ImpulseRuntimeDefaults runtimeDefaults) {
@@ -125,6 +162,8 @@ public final class ImpulseConfig {
         props.setProperty("menu.title", "IMPULSE");
         props.setProperty("menu.subtitle", "A focused way into your server");
         props.setProperty("menu.hideServerNameFromPlayButton", "false");
+        props.setProperty("singleplayerenabled", "false");
+        props.setProperty("multiplayerenabled", "false");
         String minecraftVersion = valueOr(runtimeDefaults.minecraftVersion, "1.12.2");
         String loader = cleanLoader(runtimeDefaults.loader);
         String loaderVersion = valueOr(runtimeDefaults.loaderVersion, recommendedLoaderVersion(loader, minecraftVersion));
@@ -133,12 +172,13 @@ public final class ImpulseConfig {
         props.setProperty("minecraft.port", String.valueOf(serverPort.intValue()));
         props.setProperty("loader.version", loaderVersion);
         props.setProperty("forge.version", "forge".equals(loader) ? loaderVersion : valueOr(recommendedForgeVersion(minecraftVersion), ""));
-        props.setProperty("mods.directory", "mods");
+        props.setProperty("mods.directory", "impulse/mods");
+        props.setProperty("optionalmods.directory", "impulse/optionnal_mods");
         props.setProperty("mods.exclude", "");
         props.setProperty("media.iconUrl", "");
         props.setProperty("media.bannerUrl", "");
         props.setProperty("media.videoBackgroundUrl", "");
-        props.setProperty("media.directory", "impulse-media");
+        props.setProperty("media.directory", "impulse/assets");
         props.setProperty("media.iconFile", "");
         props.setProperty("media.bannerFile", "");
         props.setProperty("media.videoBackgroundFile", "");
@@ -166,7 +206,7 @@ public final class ImpulseConfig {
         return props;
     }
 
-    private static boolean writeMissingDefaults(File configFile, Properties props, Properties defaults) throws IOException {
+    private static boolean addMissingDefaults(Properties props, Properties defaults) {
         boolean changed = false;
         for (Object keyObject : defaults.keySet()) {
             String key = String.valueOf(keyObject);
@@ -175,18 +215,55 @@ public final class ImpulseConfig {
                 changed = true;
             }
         }
-        if (!changed) return false;
+        return changed;
+    }
+
+    private static void writeProperties(File configFile, Properties props) throws IOException {
         FileOutputStream output = new FileOutputStream(configFile);
         try {
             props.store(output, "Impulse server manifest settings");
         } finally {
             output.close();
         }
-        return true;
     }
 
     private static String valueOr(String value, String fallback) {
         return value == null || value.trim().length() == 0 ? fallback : value.trim();
+    }
+
+    private static void ensureImpulseDirectories(File serverRoot, ImpulseConfig config) {
+        mkdirs(new File(serverRoot, "impulse"));
+        mkdirs(new File(serverRoot, "impulse/mods"));
+        mkdirs(new File(serverRoot, "impulse/assets"));
+        mkdirs(new File(serverRoot, "impulse/optionnal_mods"));
+        mkdirs(config.modsDirectory);
+        mkdirs(config.mediaDirectory);
+        mkdirs(config.optionalModsDirectory);
+    }
+
+    private static void mkdirs(File dir) {
+        if (dir != null && !dir.exists()) dir.mkdirs();
+    }
+
+    private static String firstProperty(Properties props, String key, String fallback, String... aliases) {
+        String value = props.getProperty(key);
+        if (value == null) {
+            for (String alias : aliases) {
+                value = props.getProperty(alias);
+                if (value != null) break;
+            }
+        }
+        return valueOr(value, fallback);
+    }
+
+    private static String optionalModsDirectoryProperty(Properties props) {
+        String value = props.getProperty("optionalmods.directory");
+        String alias = props.getProperty("optionalMods.directory");
+        if (alias == null) alias = props.getProperty("optional_mods.directory");
+        if ((value == null || "optionalmods".equals(value.trim()) || "Impulse/optionnal_mods".equals(value.trim())) && alias != null && alias.trim().length() > 0) {
+            return alias.trim();
+        }
+        return valueOr(value, "impulse/optionnal_mods");
     }
 
     private static boolean parseBooleanAlias(Properties props, String key, String fallback, String... aliases) {

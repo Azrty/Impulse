@@ -1,5 +1,6 @@
 export interface ImpulseMod {
   name: string;
+  description: string;
   file_name: string;
   download_url: string | null;
   sha1: string | null;
@@ -31,8 +32,11 @@ export interface ImpulseManifest {
     title: string;
     subtitle: string;
     hide_server_name_from_play_button: boolean;
+    singleplayer_enabled: boolean;
+    multiplayer_enabled: boolean;
   };
   mods: ImpulseMod[];
+  optional_mods: ImpulseMod[];
 }
 
 export interface ServerStatus {
@@ -55,6 +59,9 @@ export interface SavedServer {
   manifestPort: number;
   status: ServerStatus;
   manifest: ImpulseManifest;
+  optionalModSelections?: Record<string, boolean>;
+  optionalModSignature?: string;
+  optionalModPromptedSignature?: string | null;
   addedAt: string;
   updatedAt: string;
   profileId: string;
@@ -84,4 +91,37 @@ export interface LaunchProgress {
   progress?: number;
   total?: number;
   details?: Record<string, unknown>;
+}
+
+export interface OfflineDetails {
+  offlineKind: 'server' | 'internet';
+  title: string;
+  description: string;
+}
+
+export interface RunningGame {
+  serverId: string;
+  pid?: number;
+  logPath?: string;
+  diagnosticsDir?: string;
+}
+
+export interface CrashReport {
+  serverId: string;
+  code: number | null;
+  signal?: string | null;
+  logPath?: string;
+  diagnosticsDir?: string;
+  crashLog?: string;
+}
+
+export interface DiscordRpcSettings {
+  enabled: boolean;
+  clientId: string;
+  showServer: boolean;
+  showAddress: boolean;
+  showDimension: boolean;
+  showLoader: boolean;
+  showElapsed: boolean;
+  privacyMode: boolean;
 }

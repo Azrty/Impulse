@@ -15,3 +15,21 @@ if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.vers
 tasks.withType(JavaCompile).all {
     options.encoding = 'UTF-8'
 }
+
+tasks.withType(Test).all {
+    if (it.hasProperty('failOnNoDiscoveredTests')) {
+        failOnNoDiscoveredTests = false
+    }
+}
+
+task runManifestServerEncodingTest(type: JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.version('6.4')) {
+        main = 'com.impulse.common.ImpulseManifestServerEncodingTest'
+    } else {
+        mainClass = 'com.impulse.common.ImpulseManifestServerEncodingTest'
+    }
+}
+
+check.dependsOn runManifestServerEncodingTest

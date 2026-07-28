@@ -12,11 +12,13 @@ contextBridge.exposeInMainWorld('api', {
   listServers: () => ipcRenderer.invoke('impulse-list-servers'),
   addServer: (payload) => ipcRenderer.invoke('impulse-add-server', payload),
   refreshServer: (serverId) => ipcRenderer.invoke('impulse-refresh-server', serverId),
+  updateOptionalMods: (serverId, selections, markPrompted = false) => ipcRenderer.invoke('impulse-update-optional-mods', serverId, selections, markPrompted),
   removeServer: (serverId) => ipcRenderer.invoke('impulse-remove-server', serverId),
   launchServer: (serverId) => ipcRenderer.invoke('impulse-launch-server', serverId),
 
   getLauncherSettings: () => ipcRenderer.invoke('get-launcher-settings'),
   updateLauncherSettings: (settings) => ipcRenderer.invoke('update-launcher-settings', settings),
+  clearGameFiles: () => ipcRenderer.invoke('clear-game-files'),
 
   onLaunchProgress: (callback) => {
     const listener = (_event, data) => callback(data);

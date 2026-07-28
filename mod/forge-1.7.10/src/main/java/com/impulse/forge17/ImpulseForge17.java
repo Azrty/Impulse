@@ -3,11 +3,12 @@ package com.impulse.forge17;
 import com.impulse.common.ImpulseManifestServer;
 import com.impulse.common.ImpulseRuntimeDefaults;
 import cpw.mods.fml.common.FMLCommonHandler;
+import cpw.mods.fml.common.Loader;
 import cpw.mods.fml.common.Mod;
 import cpw.mods.fml.common.event.FMLServerStartedEvent;
 import cpw.mods.fml.common.event.FMLServerStoppingEvent;
-import cpw.mods.fml.common.Loader;
 import cpw.mods.fml.relauncher.Side;
+import net.minecraftforge.common.MinecraftForge;
 
 import java.io.File;
 import java.lang.reflect.Method;
@@ -18,6 +19,7 @@ public final class ImpulseForge17 {
     public static final String VERSION = "0.1.0";
 
     public ImpulseForge17() {
+        MinecraftForge.EVENT_BUS.register(this);
         if (FMLCommonHandler.instance().getSide() == Side.CLIENT) {
             try {
                 Class.forName("com.impulse.forge17.ImpulseClient17").getMethod("register").invoke(null);

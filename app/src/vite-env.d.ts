@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import type { LaunchProgress, MinecraftAccount, SavedServer, User } from './types';
+import type { CrashReport, DiscordRpcSettings, LaunchProgress, MinecraftAccount, OfflineDetails, RunningGame, SavedServer, User } from './types';
 
 declare global {
   interface Window {
@@ -15,12 +15,14 @@ declare global {
 
       listServers: () => Promise<SavedServer[]>;
       addServer: (payload: { address: string; manifestPort?: number }) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
-      refreshServer: (serverId: string) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
+      refreshServer: (serverId: string) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[]; details?: OfflineDetails }>;
+      updateOptionalMods: (serverId: string, selections: Record<string, boolean>, markPrompted?: boolean) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
       removeServer: (serverId: string) => Promise<{ success: boolean; servers?: SavedServer[] }>;
-      launchServer: (serverId: string) => Promise<{ success: boolean; error?: string }>;
+      launchServer: (serverId: string) => Promise<{ success: boolean; error?: string; details?: OfflineDetails }>;
 
       getLauncherSettings: () => Promise<{
         minecraftPath: string;
+        javaRuntime: 'auto' | 'custom';
         javaPath: string | null;
         minMemory: number;
         maxMemory: number;
@@ -29,13 +31,15 @@ declare global {
           connectionsPerHost: number;
           timeout: number;
         };
+        discordRpc: DiscordRpcSettings;
       }>;
       updateLauncherSettings: (settings: Record<string, unknown>) => Promise<{ success: boolean; error?: string }>;
+      clearGameFiles: () => Promise<{ success: boolean; error?: string; cleared?: string[] }>;
 
       onLaunchProgress: (callback: (data: LaunchProgress) => void) => () => void;
-      onLaunched: (callback: (data: { serverId: string; message: string; logPath?: string; diagnosticsDir?: string }) => void) => () => void;
-      onLaunchError: (callback: (data: { serverId?: string; error: string; logPath?: string; diagnosticsDir?: string }) => void) => () => void;
-      onGameClosed: (callback: (data: { serverId: string; code: number; logPath?: string; diagnosticsDir?: string }) => void) => () => void;
+      onLaunched: (callback: (data: RunningGame & { message: string }) => void) => () => void;
+      onLaunchError: (callback: (data: { serverId?: string; error: string; logPath?: string; diagnosticsDir?: string; details?: OfflineDetails }) => void) => () => void;
+      onGameClosed: (callback: (data: CrashReport & { crashed?: boolean }) => void) => () => void;
 
       checkForUpdates: () => Promise<void>;
       downloadUpdate: () => Promise<void>;

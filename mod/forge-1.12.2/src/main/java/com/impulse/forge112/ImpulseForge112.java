@@ -2,6 +2,7 @@ package com.impulse.forge112;
 
 import com.impulse.common.ImpulseManifestServer;
 import com.impulse.common.ImpulseRuntimeDefaults;
+import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.Loader;
 import net.minecraftforge.fml.common.Mod;
@@ -18,6 +19,7 @@ public final class ImpulseForge112 {
     public static final String VERSION = "0.1.0";
 
     public ImpulseForge112() {
+        MinecraftForge.EVENT_BUS.register(this);
         if (FMLCommonHandler.instance().getSide() == Side.CLIENT) {
             try {
                 Class.forName("com.impulse.forge112.ImpulseClient112").getMethod("register").invoke(null);

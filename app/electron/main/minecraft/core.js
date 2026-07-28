@@ -660,6 +660,9 @@ class MinecraftManager {
       uuid,
       username,
       accessToken = '',
+      userType = 'legacy',
+      xuid = '',
+      clientId = '',
       maxMemory = 2048,
       minMemory = 512,
       extraJvmArgs = [],
@@ -851,13 +854,13 @@ class MinecraftManager {
       assets_index_name: assetIndex,
       auth_uuid: uuidWithoutHyphens,
       auth_access_token: effectiveAccessToken,
-      user_type: 'mojang',
+      user_type: userType,
       version_type: versionType,
       user_properties: '{}',
       auth_session: effectiveAccessToken,
       game_assets: assetDirectory,
-      auth_xuid: '',
-      clientid: '',
+      auth_xuid: xuid,
+      clientid: clientId,
       user_educator: '',
       app_icon: '',
       username,
@@ -1023,12 +1026,17 @@ class MinecraftManager {
 
   async getJavaMajor(javaPath) {
     try {
-      const { stdout, stderr } = await this.execFileAsync(javaPath, ['-version'], { timeout: 10000 });
-      const major = this.parseJavaMajor(`${stdout}\n${stderr}`);
+      const output = await this.getJavaVersionOutput(javaPath);
+      const major = this.parseJavaMajor(output);
       return Number.isFinite(major) ? major : null;
     } catch (error) {
       return null;
     }
+  }
+
+  async getJavaVersionOutput(javaPath) {
+    const { stdout, stderr } = await this.execFileAsync(javaPath, ['-version'], { timeout: 10000 });
+    return `${stdout}\n${stderr}`;
   }
 
   normalizeJavaCandidate(candidate) {
@@ -1173,7 +1181,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'java',
-      message: 'Téléchargement de Java 8 pour Forge legacy...',
+      message: 'Downloading Java 8 for legacy Forge...',
       progress: 0,
       total: 100,
       details: { step: 'java' },
@@ -1188,7 +1196,7 @@ class MinecraftManager {
       progressCallback: (data) => {
         progressCallback?.({
           status: 'java',
-          message: `Téléchargement Java 8 (${data.percentage}%)`,
+          message: `Downloading Java 8 (${data.percentage}%)`,
           progress: data.percentage,
           total: 100,
           details: { step: 'java' },
@@ -1205,7 +1213,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'java',
-      message: 'Installation de Java 8...',
+      message: 'Installing Java 8...',
       progress: 95,
       total: 100,
       details: { step: 'java' },
@@ -1229,7 +1237,7 @@ class MinecraftManager {
     await fs.writeFile(javaBinCacheFile, resolvedBin, 'utf8');
     progressCallback?.({
       status: 'java',
-      message: 'Java 8 installé',
+      message: 'Java 8 installed',
       progress: 100,
       total: 100,
       details: { step: 'java' },
@@ -1286,7 +1294,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'java',
-      message: `Téléchargement de Java ${javaVersion?.majorVersion || '?'} (${component})...`,
+      message: `Downloading Java ${javaVersion?.majorVersion || '?'} (${component})...`,
       progress: 0,
       total: 100,
       details: { step: 'java' }
@@ -1313,7 +1321,7 @@ class MinecraftManager {
               lastProgress = pct;
               progressCallback?.({
                 status: 'java',
-                message: `Téléchargement Java ${javaVersion?.majorVersion || '?'} (${pct}%)`,
+                message: `Downloading Java ${javaVersion?.majorVersion || '?'} (${pct}%)`,
                 progress: pct,
                 total: 100,
                 details: { step: 'java' }
@@ -1332,15 +1340,9 @@ class MinecraftManager {
         try { await fs.access(candidate); resolvedBin = candidate; break; } catch { /* try next */ }
       }
       if (!resolvedBin) {
-        // Last resort: find any java binary in the destination tree
-        const { execFile } = require('child_process');
-        resolvedBin = await new Promise((resolve) => {
-          execFile('find', [jreDir, '-name', 'java', '(', '-type', 'f', '-o', '-type', 'l', ')'], (err, stdout) => {
-            const line = stdout?.trim().split('\n').find(l => l.endsWith('/bin/java'));
-            resolve(line || null);
-          });
-        });
-        if (!resolvedBin) throw new Error(`bin/java not found in ${jreDir} after installation`);
+        resolvedBin = await this.findJavaBinary(jreDir);
+        const executable = process.platform === 'win32' ? 'bin/java.exe' : 'bin/java';
+        if (!resolvedBin) throw new Error(`${executable} not found in ${jreDir} after installation`);
       }
 
       // Make executable and write cache so future calls skip the download path
@@ -1352,7 +1354,7 @@ class MinecraftManager {
       console.log(`JRE installed: ${resolvedBin}`);
       progressCallback?.({
         status: 'java',
-        message: `Java ${javaVersion?.majorVersion || '?'} installé`,
+        message: `Java ${javaVersion?.majorVersion || '?'} installed`,
         progress: 100,
         total: 100,
         details: { step: 'java' }
@@ -1361,8 +1363,17 @@ class MinecraftManager {
       return resolvedBin;
     } catch (err) {
       console.error('Failed to download Mojang JRE:', err);
-      // Fall back to system java
-      return 'java';
+      const systemJava = process.platform === 'win32' ? 'java.exe' : 'java';
+      const systemMajor = await this.getJavaMajor(systemJava);
+      if (systemMajor) {
+        console.warn(`Falling back to system Java ${systemMajor}: ${systemJava}`);
+        return systemJava;
+      }
+      throw new Error(
+        `Could not install Mojang Java runtime "${component}" and no system Java was found. ` +
+        `On Windows, install Java or clear game files to retry the bundled runtime download. ` +
+        `Expected runtime location: ${jreDir}. Original error: ${err.message || err}`
+      );
     }
   }
 
@@ -1633,7 +1644,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'forge',
-      message: `Installation de Forge ${fullVersion}...`,
+      message: `Installing Forge ${fullVersion}...`,
       progress: 0, total: 100,
       details: { step: 'forge' },
     });
@@ -1645,7 +1656,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'forge',
-      message: `Récupération de la liste Forge pour ${mcVersion}...`,
+      message: `Fetching Forge list for ${mcVersion}...`,
       progress: 62, total: 100,
       details: { step: 'forge' },
     });
@@ -1665,14 +1676,14 @@ class MinecraftManager {
     });
     if (!versionObj) {
       throw new Error(
-        `Forge '${forgeVersion}' introuvable pour Minecraft ${mcVersion}. ` +
-        `Disponibles: ${forgeList.slice(0, 5).map(v => v.version).join(', ')}`
+        `Forge '${forgeVersion}' was not found for Minecraft ${mcVersion}. ` +
+        `Available: ${forgeList.slice(0, 5).map(v => v.version).join(', ')}`
       );
     }
 
     progressCallback?.({
       status: 'forge',
-      message: `Téléchargement de l'installeur Forge ${versionObj.version}...`,
+      message: `Downloading Forge installer ${versionObj.version}...`,
       progress: 65, total: 100,
       details: { step: 'forge' },
     });
@@ -1687,7 +1698,7 @@ class MinecraftManager {
             lastPct = pct;
             progressCallback?.({
               status: 'forge',
-              message: `Installation Forge (${pct}%)`,
+              message: `Installing Forge (${pct}%)`,
               progress: pct, total: 100,
               details: { step: 'forge' },
             });
@@ -1699,7 +1710,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'forge',
-      message: `Forge ${versionObj.version} installé`,
+      message: `Forge ${versionObj.version} installed`,
       progress: 100, total: 100,
       details: { step: 'forge' },
     });
@@ -1730,7 +1741,7 @@ class MinecraftManager {
     // Download any remaining Forge dependencies (libraries, natives)
     progressCallback?.({
       status: 'forge',
-      message: 'Téléchargement des bibliothèques Forge...',
+      message: 'Downloading Forge libraries...',
       progress: 80, total: 100,
       details: { step: 'forge-deps' },
     });
@@ -1747,7 +1758,7 @@ class MinecraftManager {
               lastDepPct = pct;
               progressCallback?.({
                 status: 'forge',
-                message: `Bibliothèques Forge (${pct}%)`,
+                message: `Forge libraries (${pct}%)`,
                 progress: pct, total: 100,
                 details: { step: 'forge-deps' },
               });
@@ -1758,7 +1769,7 @@ class MinecraftManager {
       });
       progressCallback?.({
         status: 'forge',
-        message: `Forge ${versionObj.version} prêt`,
+        message: `Forge ${versionObj.version} ready`,
         progress: 100, total: 100,
         details: { step: 'forge-deps' },
       });
@@ -1784,7 +1795,7 @@ class MinecraftManager {
   async installNeoForge(mcVersion, neoForgeVersion, minecraftPath, progressCallback) {
     progressCallback?.({
       status: 'neoforge',
-      message: `Installation de NeoForge ${neoForgeVersion} pour ${mcVersion}...`,
+      message: `Installing NeoForge ${neoForgeVersion} for ${mcVersion}...`,
       progress: 0, total: 100,
       details: { step: 'neoforge' },
     });
@@ -1795,7 +1806,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'neoforge',
-      message: `Téléchargement de l'installeur NeoForge ${neoForgeVersion}...`,
+      message: `Downloading NeoForge installer ${neoForgeVersion}...`,
       progress: 65, total: 100,
       details: { step: 'neoforge' },
     });
@@ -1812,7 +1823,7 @@ class MinecraftManager {
             lastPct = pct;
             progressCallback?.({
               status: 'neoforge',
-              message: `Installation NeoForge (${pct}%)`,
+              message: `Installing NeoForge (${pct}%)`,
               progress: pct, total: 100,
               details: { step: 'neoforge' },
             });
@@ -1828,7 +1839,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'neoforge',
-      message: 'Téléchargement des bibliothèques NeoForge...',
+      message: 'Downloading NeoForge libraries...',
       progress: 80, total: 100,
       details: { step: 'neoforge-deps' },
     });
@@ -1845,7 +1856,7 @@ class MinecraftManager {
               lastDepPct = pct;
               progressCallback?.({
                 status: 'neoforge',
-                message: `Bibliothèques NeoForge (${pct}%)`,
+                message: `NeoForge libraries (${pct}%)`,
                 progress: pct, total: 100,
                 details: { step: 'neoforge-deps' },
               });
@@ -1860,7 +1871,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'neoforge',
-      message: `NeoForge ${neoForgeVersion} prêt`,
+      message: `NeoForge ${neoForgeVersion} ready`,
       progress: 100, total: 100,
       details: { step: 'neoforge-deps' },
     });
@@ -1883,7 +1894,7 @@ class MinecraftManager {
   async installFabric(mcVersion, loaderVersion, minecraftPath, progressCallback) {
     progressCallback?.({
       status: 'fabric',
-      message: `Installation de Fabric ${loaderVersion} pour ${mcVersion}...`,
+      message: `Installing Fabric ${loaderVersion} for ${mcVersion}...`,
       progress: 0, total: 100,
       details: { step: 'fabric' },
     });
@@ -1895,7 +1906,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'fabric',
-      message: `Téléchargement de Fabric ${loaderVersion}...`,
+      message: `Downloading Fabric ${loaderVersion}...`,
       progress: 70, total: 100,
       details: { step: 'fabric' },
     });
@@ -1910,7 +1921,7 @@ class MinecraftManager {
     // Now download the Fabric libraries via installDependenciesTask
     progressCallback?.({
       status: 'fabric',
-      message: 'Téléchargement des bibliothèques Fabric...',
+      message: 'Downloading Fabric libraries...',
       progress: 80, total: 100,
       details: { step: 'fabric' },
     });
@@ -1927,7 +1938,7 @@ class MinecraftManager {
             lastPct = pct;
             progressCallback?.({
               status: 'fabric',
-              message: `Bibliothèques Fabric (${pct}%)`,
+              message: `Fabric libraries (${pct}%)`,
               progress: pct, total: 100,
               details: { step: 'fabric' },
             });
@@ -1938,7 +1949,7 @@ class MinecraftManager {
 
     progressCallback?.({
       status: 'fabric',
-      message: `Fabric ${loaderVersion} installé`,
+      message: `Fabric ${loaderVersion} installed`,
       progress: 100, total: 100,
       details: { step: 'fabric' },
     });

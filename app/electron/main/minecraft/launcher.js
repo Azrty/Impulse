@@ -133,10 +133,14 @@ class MinecraftLauncher {
     const {
       version,
       minecraftPath,
+      javaRuntime = 'auto',
       javaPath: explicitJavaPath,
       username,
       uuid = uuidv4(),
       accessToken = '',
+      userType = 'legacy',
+      xuid = '',
+      clientId = '',
       maxMemory = 2048,
       minMemory = 1024,
       extraJvmArgs = [],
@@ -144,6 +148,7 @@ class MinecraftLauncher {
       gameDir = null,
       serverAddress = null,
       serverPort = null,
+      progressCallback = null,
     } = options;
     
     // Get version metadata
@@ -216,11 +221,14 @@ class MinecraftLauncher {
         versionData._nativesVersionId = version;
       }
 
-      // Resolve the java path: explicit override → Mojang JRE → 'java'
-      let javaPath = explicitJavaPath || 'java';
-      if (!explicitJavaPath) {
-        javaPath = await this.manager.ensureJavaRuntime(versionData, minecraftPath);
-      }
+      const javaResolution = await this.resolveJavaRuntime({
+        javaRuntime,
+        explicitJavaPath,
+        versionData,
+        minecraftPath,
+        progressCallback,
+      });
+      const javaPath = javaResolution.javaPath;
       
       // Generate launch command
       const launchCommand = this.manager.generateLaunchCommand(versionData, {
@@ -229,6 +237,9 @@ class MinecraftLauncher {
         uuid,
         username,
         accessToken,
+        userType,
+        xuid,
+        clientId,
         maxMemory,
         minMemory,
         extraJvmArgs,
@@ -253,6 +264,42 @@ class MinecraftLauncher {
       console.error('Failed to launch Minecraft:', error);
       throw error;
     }
+  }
+
+  async resolveJavaRuntime({ javaRuntime, explicitJavaPath, versionData, minecraftPath, progressCallback }) {
+    const mode = ['auto', 'custom'].includes(String(javaRuntime)) ? String(javaRuntime) : 'auto';
+
+    if (mode === 'custom') {
+      return {
+        javaPath: await this.resolveCustomJavaPath(explicitJavaPath),
+        mode,
+      };
+    }
+
+    return {
+      javaPath: await this.manager.ensureJavaRuntime(versionData, minecraftPath, progressCallback),
+      mode,
+    };
+  }
+
+  async resolveCustomJavaPath(explicitJavaPath) {
+    const explicitJava = String(explicitJavaPath || '').trim();
+    if (!explicitJava) throw new Error('Java Runtime is set to Custom, but no Java path is configured.');
+    const bareJavaCommands = process.platform === 'win32' ? ['java', 'java.exe'] : ['java'];
+    const javaPath = bareJavaCommands.includes(explicitJava.toLowerCase())
+      ? explicitJava
+      : this.manager.normalizeJavaCandidate(explicitJava);
+    const isBareCommand = bareJavaCommands.includes(String(javaPath).toLowerCase());
+    if (!isBareCommand) {
+      try {
+        await fs.access(javaPath);
+      } catch {
+        throw new Error(`Configured Java executable was not found: ${javaPath}`);
+      }
+    } else if (!await this.manager.getJavaMajor(javaPath)) {
+      throw new Error(`Configured Java command was not found on PATH: ${javaPath}`);
+    }
+    return javaPath;
   }
 }
 

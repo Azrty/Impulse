@@ -15,7 +15,7 @@ import {
   Trash2,
   X
 } from 'lucide-react';
-import type { LaunchProgress, SavedServer, User as ImpulseUser } from './types';
+import type { CrashReport, DiscordRpcSettings, ImpulseMod, LaunchProgress, OfflineDetails, RunningGame, SavedServer, User as ImpulseUser } from './types';
 import impulseIcon from '../assets/icon.png';
 
 type UpdateStatus = {
@@ -25,6 +25,25 @@ type UpdateStatus = {
   message?: string;
   percent?: number;
 };
+
+const defaultDiscordRpcSettings: DiscordRpcSettings = {
+  enabled: true,
+  clientId: '1531038946409320539',
+  showServer: true,
+  showAddress: false,
+  showDimension: true,
+  showLoader: true,
+  showElapsed: true,
+  privacyMode: false
+};
+type JavaRuntimeMode = 'auto' | 'custom';
+
+function normalizeJavaRuntime(value: unknown, javaPath?: string | null): JavaRuntimeMode {
+  if (value === 'custom') return 'custom';
+  if (value === 'auto') return 'auto';
+  if (!value && javaPath) return 'custom';
+  return 'auto';
+}
 
 function formatBytes(value: number) {
   if (!value) return 'Unknown size';
@@ -41,6 +60,58 @@ function formatBytes(value: number) {
 function progressPercent(progress?: LaunchProgress) {
   if (!progress?.total) return 0;
   return Math.max(0, Math.min(100, Math.round(((progress.progress || 0) / progress.total) * 100)));
+}
+
+function optionalModKey(mod: ImpulseMod) {
+  return String(mod.sha1 || mod.file_name || mod.name || '').toLowerCase();
+}
+
+function optionalSignature(server: SavedServer) {
+  return server.optionalModSignature || '';
+}
+
+function needsOptionalPrompt(server: SavedServer) {
+  return (server.manifest.optional_mods || []).length > 0
+    && server.optionalModPromptedSignature !== optionalSignature(server);
+}
+
+function minecraftAvatarUrl(user: ImpulseUser | null) {
+  const username = String(user?.username || '').trim();
+  return username ? `https://api.mcheads.org/head/${encodeURIComponent(username)}/80` : '';
+}
+
+function offlineDetailsFromProgress(progress: LaunchProgress | null): OfflineDetails | null {
+  if (progress?.status !== 'server-offline') return null;
+  const details = progress.details || {};
+  const title = typeof details.title === 'string' ? details.title : '';
+  const description = typeof details.description === 'string' ? details.description : '';
+  const offlineKind = details.offlineKind === 'internet' ? 'internet' : 'server';
+  if (!title || !description) {
+    return {
+      offlineKind,
+      title: 'This server seems to be offline',
+      description: 'Your internet connection is working, but Impulse cannot reach this Minecraft server right now. Try again later or contact the server owner.'
+    };
+  }
+  return { offlineKind, title, description };
+}
+
+function UserAvatar({ user }: { user: ImpulseUser }) {
+  const [failed, setFailed] = useState(false);
+  const [steveFailed, setSteveFailed] = useState(false);
+  const avatar = minecraftAvatarUrl(user);
+  const steveAvatar = 'https://api.mcheads.org/head/Steve/80';
+  return (
+    <div className="grid h-10 w-10 place-items-center overflow-hidden bg-white text-black">
+      {avatar && !failed ? (
+        <img src={avatar} alt="" className="h-full w-full object-cover" onError={() => setFailed(true)} />
+      ) : !steveFailed ? (
+        <img src={steveAvatar} alt="" className="h-full w-full object-cover" onError={() => setSteveFailed(true)} />
+      ) : (
+        <span className="text-sm font-semibold">{user.username.slice(0, 1).toUpperCase()}</span>
+      )}
+    </div>
+  );
 }
 
 function WindowControls() {
@@ -276,34 +347,81 @@ function AddServerModal({
 }
 
 function SettingsPanel({ onClose }: { onClose: () => void }) {
-  const [settings, setSettings] = useState({ minecraftPath: '', javaPath: '', minMemory: 1024, maxMemory: 4096 });
+  const [settings, setSettings] = useState({
+    minecraftPath: '',
+    javaRuntime: 'auto' as JavaRuntimeMode,
+    javaPath: '',
+    minMemory: 1024,
+    maxMemory: 4096,
+    discordRpc: defaultDiscordRpcSettings
+  });
   const [saved, setSaved] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [clearMessage, setClearMessage] = useState<string | null>(null);
+  const [clearError, setClearError] = useState<string | null>(null);
 
   useEffect(() => {
     window.api?.getLauncherSettings().then((data) => {
       setSettings({
         minecraftPath: data.minecraftPath,
+        javaRuntime: normalizeJavaRuntime(data.javaRuntime, data.javaPath),
         javaPath: data.javaPath || '',
         minMemory: data.minMemory,
-        maxMemory: data.maxMemory
+        maxMemory: data.maxMemory,
+        discordRpc: { ...defaultDiscordRpcSettings, ...(data.discordRpc || {}) }
       });
     });
   }, []);
 
+  const setDiscordRpc = (patch: Partial<DiscordRpcSettings>) => {
+    setSettings((current) => ({
+      ...current,
+      discordRpc: {
+        ...current.discordRpc,
+        ...patch
+      }
+    }));
+  };
+
   const save = async () => {
     await window.api?.updateLauncherSettings({
       minecraftPath: settings.minecraftPath,
+      javaRuntime: settings.javaRuntime,
       javaPath: settings.javaPath || null,
       minMemory: Number(settings.minMemory),
-      maxMemory: Number(settings.maxMemory)
+      maxMemory: Number(settings.maxMemory),
+      discordRpc: settings.discordRpc
     });
     setSaved(true);
     window.setTimeout(() => setSaved(false), 1600);
   };
 
+  const clearGameFiles = async () => {
+    const confirmed = window.confirm(
+      'Clear downloaded Minecraft versions, libraries, assets, profiles, cached mods, logs, and bundled Java runtimes for Impulse? Accounts and saved servers will stay.'
+    );
+    if (!confirmed) return;
+
+    setClearing(true);
+    setClearMessage(null);
+    setClearError(null);
+    try {
+      const result = await window.api?.clearGameFiles();
+      if (!result?.success) {
+        setClearError(result?.error || 'Unable to clear game files.');
+        return;
+      }
+      setClearMessage('Game files cleared. Impulse will redownload what it needs on next launch.');
+    } catch (error) {
+      setClearError(error instanceof Error ? error.message : 'Unable to clear game files.');
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/80 px-5">
-      <div className="w-full max-w-xl border border-white/15 bg-[#050505] p-5">
+      <div className="max-h-[calc(100vh-48px)] w-full max-w-xl overflow-y-auto border border-white/15 bg-[#050505] p-5">
         <div className="mb-5 flex items-center justify-between">
           <h2 className="text-lg font-semibold">Launcher Settings</h2>
           <button onClick={onClose} className="p-2 hover:bg-white/10" aria-label="Close">
@@ -316,9 +434,27 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
             <input className="mt-2 h-11 w-full border border-white/15 bg-black px-3 outline-none focus:border-white" value={settings.minecraftPath} onChange={(event) => setSettings({ ...settings, minecraftPath: event.target.value })} />
           </label>
           <label className="block">
-            <span className="text-xs uppercase tracking-[0.18em] text-white/50">Java Path</span>
-            <input className="mt-2 h-11 w-full border border-white/15 bg-black px-3 outline-none focus:border-white" value={settings.javaPath} onChange={(event) => setSettings({ ...settings, javaPath: event.target.value })} placeholder="Auto" />
+            <span className="text-xs uppercase tracking-[0.18em] text-white/50">Java Runtime</span>
+            <select
+              className="mt-2 h-11 w-full border border-white/15 bg-black px-3 outline-none focus:border-white"
+              value={settings.javaRuntime}
+              onChange={(event) => setSettings({ ...settings, javaRuntime: event.target.value as JavaRuntimeMode })}
+            >
+              <option value="auto">Auto / Mojang Java</option>
+              <option value="custom">Custom Java Path</option>
+            </select>
+            <p className="mt-2 text-xs text-white/45">
+              {settings.javaRuntime === 'custom'
+                ? 'Use a specific java or java.exe executable.'
+                : 'Impulse uses the managed Mojang Java runtime.'}
+            </p>
           </label>
+          {settings.javaRuntime === 'custom' && (
+            <label className="block">
+              <span className="text-xs uppercase tracking-[0.18em] text-white/50">Custom Java Path</span>
+              <input className="mt-2 h-11 w-full border border-white/15 bg-black px-3 outline-none focus:border-white" value={settings.javaPath} onChange={(event) => setSettings({ ...settings, javaPath: event.target.value })} placeholder="C:\\Java\\bin\\java.exe" />
+            </label>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <label className="block">
               <span className="text-xs uppercase tracking-[0.18em] text-white/50">Min Memory MB</span>
@@ -328,6 +464,59 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
               <span className="text-xs uppercase tracking-[0.18em] text-white/50">Max Memory MB</span>
               <input className="mt-2 h-11 w-full border border-white/15 bg-black px-3 outline-none focus:border-white" value={settings.maxMemory} type="number" onChange={(event) => setSettings({ ...settings, maxMemory: Number(event.target.value) })} />
             </label>
+          </div>
+          <div className="border border-white/10 bg-white/[0.03] p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold text-white">Discord Rich Presence</p>
+                <p className="mt-1 text-xs text-white/50">Show Impulse and live Minecraft context in Discord.</p>
+              </div>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-white/70">
+                <input
+                  type="checkbox"
+                  checked={settings.discordRpc.enabled}
+                  onChange={(event) => setDiscordRpc({ enabled: event.target.checked })}
+                />
+                Enabled
+              </label>
+            </div>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+              {[
+                ['showServer', 'Show server name'],
+                ['showAddress', 'Show server address'],
+                ['showDimension', 'Show dimension'],
+                ['showLoader', 'Show version/loader'],
+                ['showElapsed', 'Show elapsed time'],
+                ['privacyMode', 'Privacy mode']
+              ].map(([key, label]) => (
+                <label key={key} className="flex cursor-pointer items-center gap-2 border border-white/10 bg-black/40 px-3 py-2 text-xs text-white/70">
+                  <input
+                    type="checkbox"
+                    checked={settings.discordRpc[key as keyof DiscordRpcSettings] as boolean}
+                    onChange={(event) => setDiscordRpc({ [key]: event.target.checked } as Partial<DiscordRpcSettings>)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="border border-red-300/20 bg-red-950/10 p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-white">Game Files</p>
+                <p className="mt-1 text-xs text-white/50">Clear downloaded Minecraft data for a fresh reinstall.</p>
+              </div>
+              <button
+                onClick={clearGameFiles}
+                disabled={clearing}
+                className="inline-flex h-10 items-center justify-center gap-2 border border-red-200/25 px-3 text-sm font-medium text-red-100 transition hover:border-red-100/60 hover:bg-red-200/10 disabled:opacity-50"
+              >
+                {clearing ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+                {clearing ? 'Clearing...' : 'Clear Game Files'}
+              </button>
+            </div>
+            {clearMessage && <p className="mt-3 text-xs text-white/55">{clearMessage}</p>}
+            {clearError && <p className="mt-3 text-xs text-red-300">{clearError}</p>}
           </div>
         </div>
         <button onClick={save} className="mt-5 h-11 w-full bg-white font-medium text-black hover:bg-white/85">
@@ -361,7 +550,7 @@ function UpdateBanner({ update }: { update: UpdateStatus | null }) {
               <div className="h-full bg-white transition-all" style={{ width: `${Math.max(0, Math.min(100, update.percent || 0))}%` }} />
             </div>
           )}
-          {update.status === 'available' && !update.startup && (
+          {update.status === 'available' && (
             <button onClick={() => window.api?.downloadUpdate()} className="mt-3 rounded-md border border-white/20 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-white hover:text-black">
               Download
             </button>
@@ -382,15 +571,21 @@ function ServerDetail({
   progress,
   error,
   launching,
+  running,
+  crash,
   onLaunch,
-  onRemove
+  onRemove,
+  onOptionalChange
 }: {
   server: SavedServer | null;
   progress: LaunchProgress | null;
   error: string | null;
   launching: boolean;
+  running: boolean;
+  crash: CrashReport | null;
   onLaunch: () => void;
   onRemove: () => void;
+  onOptionalChange: (serverId: string, selections: Record<string, boolean>) => void;
 }) {
   if (!server) {
     return (
@@ -405,6 +600,17 @@ function ServerDetail({
 
   const manifest = server.manifest;
   const pct = progressPercent(progress || undefined);
+  const optionalMods = manifest.optional_mods || [];
+  const optionalSelections = server.optionalModSelections || {};
+  const busy = launching || running;
+  const offlineCard = offlineDetailsFromProgress(progress);
+
+  const setOptionalEnabled = (mod: ImpulseMod, enabled: boolean) => {
+    onOptionalChange(server.id, {
+      ...optionalSelections,
+      [optionalModKey(mod)]: enabled
+    });
+  };
 
   return (
     <div className="h-full overflow-y-auto scrollbar-thin">
@@ -434,9 +640,9 @@ function ServerDetail({
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <button onClick={onLaunch} disabled={launching} className="flex h-11 items-center gap-2 bg-white px-5 font-medium text-black hover:bg-white/85 disabled:opacity-60">
-              <Play size={17} />
-              {launching ? 'Launching...' : 'Launch'}
+            <button onClick={onLaunch} disabled={busy} className="flex h-11 items-center gap-2 bg-white px-5 font-medium text-black hover:bg-white/85 disabled:cursor-not-allowed disabled:opacity-60">
+              {running ? <Gauge size={17} /> : <Play size={17} />}
+              {running ? 'Running' : launching ? 'Launching...' : 'Launch'}
             </button>
             <div className="ml-auto flex items-center gap-2 text-sm text-white/70">
               <span className={`h-2 w-2 rounded-full ${server.status.online ? 'bg-white' : 'bg-red-300'}`} />
@@ -448,19 +654,38 @@ function ServerDetail({
 
       <div className="grid gap-5 p-6 lg:grid-cols-[1fr_330px]">
         <section className="border border-white/10 bg-white/[0.025] p-5">
+          {offlineCard && (
+            <div className="mb-5 border border-red-300/20 bg-black p-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 shrink-0 text-red-300" size={18} />
+                <div className="min-w-0">
+                  <div className="font-medium">{offlineCard.title}</div>
+                  <p className="mt-1 break-words text-sm leading-6 text-white/60">{offlineCard.description}</p>
+                </div>
+              </div>
+            </div>
+          )}
           <h2 className="mb-2 text-lg font-semibold">Server</h2>
           <p className="text-sm leading-6 text-white/70">{manifest.description || 'No description provided.'}</p>
 
-          {(progress || error) && (
+          {(progress || error || crash) && !offlineCard && (
             <div className="mt-5 border border-white/10 bg-black p-4">
               <div className="mb-3 flex items-start gap-3">
-                {error ? <AlertTriangle className="mt-0.5 text-red-300" size={18} /> : <Gauge className="mt-0.5 text-white" size={18} />}
+                {error || crash ? <AlertTriangle className="mt-0.5 text-red-300" size={18} /> : <Gauge className="mt-0.5 text-white" size={18} />}
                 <div className="min-w-0">
-                  <div className="font-medium">{error ? 'Launch Error' : progress?.status || 'Working'}</div>
-                  <p className="break-words text-sm text-white/60">{error || progress?.message}</p>
+                  <div className="font-medium">{error || crash ? 'Launch Error' : progress?.status || 'Working'}</div>
+                  <p className="break-words text-sm text-white/60">
+                    {error || (crash ? `Minecraft crashed with exit code ${crash.code ?? 'unknown'}.` : progress?.message)}
+                  </p>
+                  {crash?.logPath && <p className="mt-1 break-words text-xs text-white/35">{crash.logPath}</p>}
                 </div>
               </div>
-              {!error && (
+              {crash?.crashLog && (
+                <pre className="max-h-72 overflow-auto whitespace-pre-wrap border border-white/10 bg-white/[0.03] p-3 text-xs leading-5 text-white/70 scrollbar-thin">
+                  {crash.crashLog}
+                </pre>
+              )}
+              {!error && !crash && (
                 <div className="h-2 bg-white/10">
                   <div className="h-full bg-white transition-all" style={{ width: `${pct}%` }} />
                 </div>
@@ -479,16 +704,54 @@ function ServerDetail({
               ) : (
                 manifest.mods.map((mod) => (
                   <div key={`${mod.sha1}-${mod.file_name}`} className="flex items-center justify-between gap-4 p-3">
-                    <div className="min-w-0">
+                    <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{mod.name}</p>
-                      <p className="truncate text-xs text-white/45">{mod.file_name}</p>
+                      <p className="mod-description-clamp text-xs text-white/45">{mod.description || mod.file_name}</p>
+                      {mod.description && <p className="truncate text-xs text-white/30">{mod.file_name}</p>}
                     </div>
                     <div className="shrink-0 text-right text-xs text-white/45">
                       <div>{formatBytes(mod.size)}</div>
-                      <div>{mod.required ? 'Required' : 'Optional'}</div>
+                      <div>Required</div>
                     </div>
                   </div>
                 ))
+              )}
+            </div>
+          </div>
+
+          <div className="mt-6">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="font-medium">Optional Mods</h3>
+              <span className="text-sm text-white/50">{optionalMods.length} files</span>
+            </div>
+            <div className="divide-y divide-white/10 border border-white/10">
+              {optionalMods.length === 0 ? (
+                <div className="p-4 text-sm text-white/50">No optional server mods.</div>
+              ) : (
+                optionalMods.map((mod) => {
+                  const checked = optionalSelections[optionalModKey(mod)] === true;
+                  return (
+                    <label key={`${mod.sha1}-${mod.file_name}`} className="flex cursor-pointer items-center justify-between gap-4 p-3 transition hover:bg-white/[0.035]">
+                      <div className="flex min-w-0 flex-1 items-start gap-3">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => setOptionalEnabled(mod, event.currentTarget.checked)}
+                          className="mt-1 h-4 w-4 accent-white"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{mod.name}</p>
+                          <p className="mod-description-clamp text-xs text-white/45">{mod.description || mod.file_name}</p>
+                          {mod.description && <p className="truncate text-xs text-white/30">{mod.file_name}</p>}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-right text-xs text-white/45">
+                        <div>{formatBytes(mod.size)}</div>
+                        <div>{checked ? 'Enabled' : 'Disabled'}</div>
+                      </div>
+                    </label>
+                  );
+                })
               )}
             </div>
           </div>
@@ -520,6 +783,74 @@ function ServerDetail({
   );
 }
 
+function OptionalModsModal({
+  server,
+  onCancel,
+  onLaunch
+}: {
+  server: SavedServer;
+  onCancel: () => void;
+  onLaunch: (selections: Record<string, boolean>) => void;
+}) {
+  const [selections, setSelections] = useState<Record<string, boolean>>(server.optionalModSelections || {});
+  const optionalMods = server.manifest.optional_mods || [];
+  const changed = !!server.optionalModPromptedSignature;
+
+  const setEnabled = (mod: ImpulseMod, enabled: boolean) => {
+    setSelections((current) => ({ ...current, [optionalModKey(mod)]: enabled }));
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-6 backdrop-blur-sm">
+      <div className="w-full max-w-2xl border border-white/15 bg-[#080808] shadow-2xl">
+        <div className="border-b border-white/10 p-5">
+          <h2 className="text-xl font-semibold">{changed ? 'The server added new optional mods' : 'Choose optional mods'}</h2>
+          <p className="mt-1 text-sm text-white/55">
+            Select the optional mods you want enabled for {server.manifest.name}. You can change this later from the server mod list.
+          </p>
+        </div>
+        <div className="max-h-[52vh] overflow-y-auto p-5">
+          <div className="divide-y divide-white/10 border border-white/10">
+            {optionalMods.map((mod) => {
+              const checked = selections[optionalModKey(mod)] === true;
+              return (
+                <label key={`${mod.sha1}-${mod.file_name}`} className="flex cursor-pointer items-center justify-between gap-4 p-3 transition hover:bg-white/[0.035]">
+                  <div className="flex min-w-0 flex-1 items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(event) => setEnabled(mod, event.currentTarget.checked)}
+                      className="mt-1 h-4 w-4 accent-white"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{mod.name}</p>
+                      <p className="mod-description-clamp text-xs text-white/45">{mod.description || mod.file_name}</p>
+                      {mod.description && <p className="truncate text-xs text-white/30">{mod.file_name}</p>}
+                    </div>
+                  </div>
+                  <div className="shrink-0 text-right text-xs text-white/45">
+                    <div>{formatBytes(mod.size)}</div>
+                    <div>{checked ? 'Enabled' : 'Disabled'}</div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+        <div className="flex justify-end gap-3 border-t border-white/10 p-5">
+          <button onClick={onCancel} className="h-10 border border-white/15 px-4 text-sm text-white/70 hover:bg-white/10">
+            Cancel
+          </button>
+          <button onClick={() => onLaunch(selections)} className="flex h-10 items-center gap-2 bg-white px-4 text-sm font-medium text-black hover:bg-white/85">
+            <Play size={16} />
+            Launch
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [user, setUser] = useState<ImpulseUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -530,7 +861,10 @@ export default function App() {
   const [progress, setProgress] = useState<LaunchProgress | null>(null);
   const [launchError, setLaunchError] = useState<string | null>(null);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [runningGame, setRunningGame] = useState<RunningGame | null>(null);
+  const [crashReport, setCrashReport] = useState<CrashReport | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [optionalPromptServer, setOptionalPromptServer] = useState<SavedServer | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -548,13 +882,19 @@ export default function App() {
       setServers(data);
       setSelectedId((current) => current || data[0]?.id || null);
 
-      for (const server of data) {
+      await Promise.allSettled(data.map(async (server) => {
         if (cancelled) return;
-        const result = await window.api?.refreshServer(server.id);
-        if (!cancelled && result?.success && result.servers) {
-          setServers(result.servers);
+        try {
+          const result = await window.api?.refreshServer(server.id);
+          if (!cancelled && result?.success && result.server) {
+            setServers((current) => current.map((entry) => (
+              entry.id === result.server?.id ? result.server : entry
+            )));
+          }
+        } catch {
+          // Startup refresh is best-effort; keep the saved server visible.
         }
-      }
+      }));
     };
 
     loadServers();
@@ -569,13 +909,31 @@ export default function App() {
       window.api?.onLaunchProgress((data) => {
         setProgress(data);
         setLaunchError(null);
+        setCrashReport(null);
       }),
       window.api?.onLaunchError((data) => {
-        setLaunchError(data.error);
+        if (data.error === 'The server is offline') {
+          setProgress({ status: 'server-offline', message: 'The server is offline', progress: 0, total: 100, details: data.details });
+          setLaunchError(null);
+        } else {
+          setLaunchError(data.error);
+          setProgress(null);
+        }
+        setLaunchingId(null);
+        setRunningGame(null);
+      }),
+      window.api?.onLaunched((data) => {
+        setRunningGame(data);
+        setProgress(null);
         setLaunchingId(null);
       }),
-      window.api?.onLaunched(() => {
-        setLaunchingId(null);
+      window.api?.onGameClosed((data) => {
+        setRunningGame((current) => (current?.serverId === data.serverId ? null : current));
+        setLaunchingId((current) => (current === data.serverId ? null : current));
+        if (data.crashed) {
+          setLaunchError(null);
+          setCrashReport(data);
+        }
       }),
       window.api?.onUpdateStatus((data) => {
         setUpdateStatus(data);
@@ -588,6 +946,8 @@ export default function App() {
     () => servers.find((server) => server.id === selectedId) || null,
     [servers, selectedId]
   );
+  const selectedServerIsLaunching = !!selectedServer && launchingId === selectedServer.id;
+  const selectedProgress = selectedServer && (selectedServerIsLaunching || progress?.status === 'server-offline') ? progress : null;
 
   const removeSelected = async () => {
     if (!selectedServer) return;
@@ -598,27 +958,88 @@ export default function App() {
     }
   };
 
-  const launchSelected = async () => {
-    if (!selectedServer) return;
-    const serverId = selectedServer.id;
+  const updateOptionalMods = async (serverId: string, selections: Record<string, boolean>, markPrompted = false) => {
+    const result = await window.api?.updateOptionalMods(serverId, selections, markPrompted);
+    if (result?.success && result.servers) setServers(result.servers);
+    if (result?.success && result.server) return result.server;
+    if (!result?.success) setLaunchError(result?.error || 'Unable to update optional mods.');
+    return null;
+  };
+
+  const continueLaunch = async (serverId: string) => {
+    if (runningGame) return;
+    setCrashReport(null);
+    setProgress({ status: 'queued', message: 'Preparing launch...', progress: 0, total: 100 });
+    let result;
+    try {
+      result = await window.api?.launchServer(serverId);
+    } catch (err) {
+      setProgress(null);
+      setLaunchError(err instanceof Error ? err.message : 'Launch failed.');
+      setLaunchingId(null);
+      return;
+    }
+    if (!result?.success) {
+      if (result?.error === 'The server is offline') {
+        setProgress({ status: 'server-offline', message: 'The server is offline', progress: 0, total: 100, details: result.details });
+        setLaunchError(null);
+      } else {
+        setProgress(null);
+        setLaunchError(result?.error || 'Launch failed.');
+      }
+      setLaunchingId(null);
+    }
+  };
+
+  const refreshBeforeLaunch = async (serverId: string) => {
+    if (runningGame) return null;
     setProgress({ status: 'refreshing', message: 'Refreshing server manifest...', progress: 0, total: 100 });
     setLaunchError(null);
+    setCrashReport(null);
     setLaunchingId(serverId);
 
-    const refreshResult = await window.api?.refreshServer(serverId);
+    let refreshResult;
+    try {
+      refreshResult = await window.api?.refreshServer(serverId);
+    } catch (err) {
+      setProgress(null);
+      setLaunchError(err instanceof Error ? err.message : 'Refresh failed.');
+      setLaunchingId(null);
+      return;
+    }
     if (!refreshResult?.success) {
+      setProgress(null);
       setLaunchError(refreshResult?.error || 'Refresh failed.');
       setLaunchingId(null);
       return;
     }
     if (refreshResult.servers) setServers(refreshResult.servers);
-
-    setProgress({ status: 'queued', message: 'Preparing launch...', progress: 0, total: 100 });
-    const result = await window.api?.launchServer(serverId);
-    if (!result?.success) {
-      setLaunchError(result?.error || 'Launch failed.');
+    const refreshedServer = refreshResult.server || refreshResult.servers?.find((server) => server.id === serverId) || null;
+    if (refreshedServer?.status?.online === false) {
+      setProgress({
+        status: 'server-offline',
+        message: refreshedServer.status.error || 'The server is offline',
+        progress: 0,
+        total: 100,
+        details: refreshResult.details
+      });
       setLaunchingId(null);
+      return null;
     }
+    return refreshedServer;
+  };
+
+  const launchSelected = async () => {
+    if (!selectedServer) return;
+    const serverId = selectedServer.id;
+    const refreshedServer = await refreshBeforeLaunch(serverId);
+    if (!refreshedServer) return;
+    if (needsOptionalPrompt(refreshedServer)) {
+      setProgress(null);
+      setOptionalPromptServer(refreshedServer);
+      return;
+    }
+    await continueLaunch(serverId);
   };
 
   if (!authChecked) {
@@ -635,9 +1056,7 @@ export default function App() {
           <aside className="flex w-72 shrink-0 flex-col border-r border-white/10 bg-[#050505]">
             <div className="border-b border-white/10 p-4">
               <div className="flex items-center gap-3">
-                <div className="grid h-10 w-10 place-items-center overflow-hidden bg-white text-black">
-                  <img src={impulseIcon} alt="" className="h-full w-full object-cover" />
-                </div>
+                <UserAvatar user={user} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{user.username}</p>
                   <p className="text-xs text-white/45">{user.type === 'microsoft' ? 'Microsoft account' : 'Offline account'}</p>
@@ -663,7 +1082,10 @@ export default function App() {
                   {servers.map((server) => (
                     <button
                       key={server.id}
-                      onClick={() => setSelectedId(server.id)}
+                      onClick={() => {
+                        setSelectedId(server.id);
+                        if (progress?.status === 'server-offline') setProgress(null);
+                      }}
                       className={`group flex w-full items-center gap-3 rounded-md p-3 text-left transition ${
                         selectedId === server.id
                           ? 'bg-white text-black shadow-[0_8px_24px_rgba(255,255,255,0.08)] hover:bg-white'
@@ -697,11 +1119,14 @@ export default function App() {
           <main className="min-w-0 flex-1">
             <ServerDetail
               server={selectedServer}
-              progress={selectedServer && launchingId === selectedServer.id ? progress : null}
+              progress={selectedProgress}
               error={launchError}
-              launching={!!selectedServer && launchingId === selectedServer.id}
+              launching={selectedServerIsLaunching}
+              running={!!runningGame}
+              crash={selectedServer && crashReport?.serverId === selectedServer.id ? crashReport : null}
               onLaunch={launchSelected}
               onRemove={removeSelected}
+              onOptionalChange={updateOptionalMods}
             />
           </main>
           {showAdd && (
@@ -714,6 +1139,21 @@ export default function App() {
             />
           )}
           {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+          {optionalPromptServer && (
+            <OptionalModsModal
+              server={optionalPromptServer}
+              onCancel={() => {
+                setOptionalPromptServer(null);
+                setLaunchingId(null);
+              }}
+              onLaunch={async (selections) => {
+                const updated = await updateOptionalMods(optionalPromptServer.id, selections, true);
+                if (!updated) return;
+                setOptionalPromptServer(null);
+                await continueLaunch(updated.id);
+              }}
+            />
+          )}
         </div>
       )}
       <UpdateBanner update={updateStatus} />

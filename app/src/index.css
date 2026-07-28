@@ -143,3 +143,13 @@ input {
 .media-video video {
   object-fit: cover !important;
 }
+
+.mod-description-clamp {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}

@@ -1,5 +1,6 @@
 package com.impulse.forge120;
 
+import com.impulse.common.ImpulseRpcReporter;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.DefaultVertexFormat;
@@ -14,6 +15,7 @@ import net.minecraft.client.gui.screens.OptionsScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.client.gui.screens.multiplayer.JoinMultiplayerScreen;
+import net.minecraft.client.gui.screens.worldselection.SelectWorldScreen;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.resolver.ServerAddress;
 import net.minecraft.network.chat.Component;
@@ -40,7 +42,7 @@ public final class ImpulseClient120 {
     @SubscribeEvent
     public void onScreenOpening(ScreenEvent.Opening event) {
         if (!isImpulseLaunch() || !menuEnabled()) return;
-        if (event.getNewScreen() instanceof TitleScreen || event.getNewScreen() instanceof JoinMultiplayerScreen) {
+        if (event.getNewScreen() instanceof TitleScreen || (event.getNewScreen() instanceof JoinMultiplayerScreen && !multiplayerEnabled())) {
             if (!(event.getNewScreen() instanceof ClassicImpulseScreen)) {
                 event.setNewScreen(menuScreen());
             }
@@ -49,9 +51,11 @@ public final class ImpulseClient120 {
 
     @SubscribeEvent
     public void onClientTick(TickEvent.ClientTickEvent event) {
-        if (!isImpulseLaunch() || !menuEnabled() || event.phase != TickEvent.Phase.END) return;
+        if (!isImpulseLaunch() || event.phase != TickEvent.Phase.END) return;
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.screen instanceof JoinMultiplayerScreen || (minecraft.screen instanceof TitleScreen && !(minecraft.screen instanceof ClassicImpulseScreen))) {
+        reportRpc(minecraft);
+        if (!menuEnabled()) return;
+        if ((minecraft.screen instanceof JoinMultiplayerScreen && !multiplayerEnabled()) || (minecraft.screen instanceof TitleScreen && !(minecraft.screen instanceof ClassicImpulseScreen))) {
             minecraft.setScreen(menuScreen());
         }
     }
@@ -97,6 +101,24 @@ public final class ImpulseClient120 {
             System.getProperty("impulse.menu.hideServerNameFromPlayButton", "false")));
     }
 
+    private static boolean singleplayerEnabled() {
+        return Boolean.parseBoolean(System.getProperty("impulse.menu.singleplayer_enabled",
+            System.getProperty("impulse.menu.singleplayerEnabled", "false")));
+    }
+
+    private static boolean singleplayerRequested() {
+        return singleplayerEnabled() && Screen.hasShiftDown();
+    }
+
+    private static boolean multiplayerEnabled() {
+        return Boolean.parseBoolean(System.getProperty("impulse.menu.multiplayer_enabled",
+            System.getProperty("impulse.menu.multiplayerEnabled", "false")));
+    }
+
+    private static boolean multiplayerRequested() {
+        return multiplayerEnabled() && Screen.hasControlDown();
+    }
+
     private static String stringProperty(String key, String fallback) {
         String value = System.getProperty(key, "").trim();
         return value.length() == 0 ? fallback : value;
@@ -113,6 +135,38 @@ public final class ImpulseClient120 {
         return classicMenu() ? new ClassicImpulseScreen() : new ImpulseScreen();
     }
 
+    private static void quitGame() {
+        Minecraft.getInstance().stop();
+    }
+
+    private static void openSingleplayer(Screen parent) {
+        Minecraft.getInstance().setScreen(new SelectWorldScreen(parent));
+    }
+
+    private static void openMultiplayer(Screen parent) {
+        Minecraft.getInstance().setScreen(new JoinMultiplayerScreen(parent));
+    }
+
+    private static void reportRpc(Minecraft minecraft) {
+        if (minecraft == null) return;
+        if (minecraft.level != null && minecraft.player != null) {
+            ImpulseRpcReporter.report("playing", "In Game", currentDimension(minecraft), !minecraft.hasSingleplayerServer());
+        } else if (minecraft.screen != null) {
+            String screen = minecraft.screen instanceof ImpulseScreen || minecraft.screen instanceof ClassicImpulseScreen ? "Main Menu" : minecraft.screen.getClass().getSimpleName();
+            ImpulseRpcReporter.report("menu", screen, "", false);
+        } else {
+            ImpulseRpcReporter.report("loading", "Loading", "", false);
+        }
+    }
+
+    private static String currentDimension(Minecraft minecraft) {
+        try {
+            return minecraft.level.dimension().location().toString();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private static final class ImpulseScreen extends Screen {
         private static final ResourceLocation LOGO = new ResourceLocation("impulse", "textures/gui/menu/logo.png");
 
@@ -121,6 +175,7 @@ public final class ImpulseClient120 {
         private long openedAt;
         private String error;
         private int ticksOpen;
+        private Button playButton;
 
         private ImpulseScreen() {
             super(Component.literal("Impulse"));
@@ -133,15 +188,27 @@ public final class ImpulseClient120 {
             int buttonHeight = 32;
             int buttonGap = 42;
             int startY = buttonStartY(buttonHeight, buttonGap);
-            this.addRenderableWidget(new ImpulseButton(this.width / 2 - buttonWidth / 2, startY, buttonWidth, buttonHeight, playComponent(), true, new Button.OnPress() {
+            this.playButton = new ImpulseButton(this.width / 2 - buttonWidth / 2, startY, buttonWidth, buttonHeight, playComponent(), true, new Button.OnPress() {
                 public void onPress(Button button) {
-                    connect();
+                    if (multiplayerRequested()) {
+                        openMultiplayer(ImpulseScreen.this);
+                    } else if (singleplayerRequested()) {
+                        openSingleplayer(ImpulseScreen.this);
+                    } else {
+                        connect();
+                    }
                 }
-            }));
+            });
+            this.addRenderableWidget(this.playButton);
             this.addRenderableWidget(new ImpulseButton(this.width / 2 - buttonWidth / 2, startY + buttonGap, buttonWidth, buttonHeight, Component.literal("Options"), false, new Button.OnPress() {
                 public void onPress(Button button) {
                     Minecraft minecraft = Minecraft.getInstance();
                     minecraft.setScreen(new OptionsScreen(ImpulseScreen.this, minecraft.options));
+                }
+            }));
+            this.addRenderableWidget(new ImpulseButton(this.width / 2 - buttonWidth / 2, startY + buttonGap * 2, buttonWidth, buttonHeight, Component.literal("Quit"), false, new Button.OnPress() {
+                public void onPress(Button button) {
+                    quitGame();
                 }
             }));
         }
@@ -157,17 +224,20 @@ public final class ImpulseClient120 {
             String serverIp = host + ":" + serverPort;
             Minecraft minecraft = Minecraft.getInstance();
             ServerData serverData = new ServerData("Impulse", serverIp, false);
+            ImpulseRpcReporter.report("connecting", "Connecting", "", false);
             ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(serverIp), serverData, false);
         }
 
         public void tick() {
             this.ticksOpen++;
+            updatePlayButton();
             if (this.ticksOpen > 2 && shouldAutoConnect()) {
                 connect();
             }
         }
 
         public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+            updatePlayButton();
             if (classicMenu()) {
                 renderClassic(graphics, mouseX, mouseY, partialTick);
                 return;
@@ -185,6 +255,7 @@ public final class ImpulseClient120 {
             if (this.error != null) {
                 graphics.drawCenteredString(this.font, this.error, this.width / 2, Math.min(startY - 14, sloganY + 20), 0xFFFFB8B8);
             }
+            drawSingleplayerHint(graphics);
             super.render(graphics, mouseX, mouseY, partialTick);
         }
 
@@ -201,6 +272,28 @@ public final class ImpulseClient120 {
                 graphics.drawCenteredString(this.font, this.error, this.width / 2, Math.max(titleY + 46, startY - 14), 0xFFFFB8B8);
             }
             super.render(graphics, mouseX, mouseY, partialTick);
+        }
+
+        private void updatePlayButton() {
+            if (this.playButton != null) {
+                this.playButton.setMessage(playComponent());
+            }
+        }
+
+        private void drawSingleplayerHint(GuiGraphics graphics) {
+            if (!singleplayerEnabled()) return;
+            int panelWidth = 86;
+            int panelHeight = 18;
+            int x = Math.max(8, this.width - panelWidth - 10);
+            int y = 8;
+            graphics.fill(x, y, x + panelWidth, y + panelHeight, 0x44000000);
+            graphics.fill(x, y, x + panelWidth, y + 1, 0x55FFFFFF);
+            graphics.fill(x, y + panelHeight - 1, x + panelWidth, y + panelHeight, 0x33FFFFFF);
+            graphics.fill(x, y, x + 1, y + panelHeight, 0x33FFFFFF);
+            graphics.fill(x + panelWidth - 1, y, x + panelWidth, y + panelHeight, 0x33FFFFFF);
+            graphics.drawString(this.font, "Shift", x + 8, y + 5, 0xCCFFFFFF, false);
+            graphics.fill(x + 42, y + 4, x + 43, y + panelHeight - 4, 0x33FFFFFF);
+            graphics.drawString(this.font, "SP", x + 52, y + 5, 0xFFFFFFFF, false);
         }
 
         public boolean isPauseScreen() {
@@ -265,11 +358,11 @@ public final class ImpulseClient120 {
         private int buttonStartY(int buttonHeight, int buttonGap) {
             if (classicMenu()) {
                 int desired = this.height / 4 + 96;
-                int maxStart = this.height - buttonGap - buttonHeight - 18;
+                int maxStart = this.height - buttonGap * 2 - buttonHeight - 18;
                 return Math.max(104, Math.min(desired, maxStart));
             }
             int desired = Math.max(176, this.height / 2 + 48);
-            int maxStart = this.height - buttonGap - buttonHeight - 14;
+            int maxStart = this.height - buttonGap * 2 - buttonHeight - 14;
             return Math.max(88, Math.min(desired, maxStart));
         }
 
@@ -307,6 +400,8 @@ public final class ImpulseClient120 {
         }
 
         private Component playComponent() {
+            if (multiplayerRequested()) return Component.literal("Multiplayer");
+            if (singleplayerRequested()) return Component.literal("Singleplayer");
             if (hideServerNameFromPlayButton()) return Component.literal("Play");
             return Component.literal("Play ").append(Component.literal(serverName()).withStyle(ChatFormatting.BOLD));
         }
@@ -316,22 +411,47 @@ public final class ImpulseClient120 {
         private static final ResourceLocation LOGO = new ResourceLocation("impulse", "textures/gui/menu/logo.png");
         private String error;
         private int ticksOpen;
+        private Button playButton;
 
         protected void init() {
             super.init();
             this.clearWidgets();
             int buttonWidth = 200;
             int buttonHeight = 20;
-            int startY = this.height / 4 + 72;
-            this.addRenderableWidget(new ClassicButton(this.width / 2 - buttonWidth / 2, startY, buttonWidth, buttonHeight, playComponent(), new Button.OnPress() {
+            int buttonCount = 3 + (multiplayerEnabled() ? 1 : 0) + (singleplayerEnabled() ? 1 : 0);
+            int startY = Math.max(72, Math.min(this.height / 4 + 72, this.height - buttonHeight - 24 * (buttonCount - 1) - 18));
+            this.playButton = new ClassicButton(this.width / 2 - buttonWidth / 2, startY, buttonWidth, buttonHeight, playComponent(), new Button.OnPress() {
                 public void onPress(Button button) {
                     connect();
                 }
-            }));
-            this.addRenderableWidget(new ClassicButton(this.width / 2 - buttonWidth / 2, startY + 24, buttonWidth, buttonHeight, Component.literal("Options"), new Button.OnPress() {
+            });
+            this.addRenderableWidget(this.playButton);
+            int optionsY = startY + 24;
+            if (multiplayerEnabled()) {
+                this.addRenderableWidget(new ClassicButton(this.width / 2 - buttonWidth / 2, optionsY, buttonWidth, buttonHeight, Component.literal("Multiplayer"), new Button.OnPress() {
+                    public void onPress(Button button) {
+                        openMultiplayer(ClassicImpulseScreen.this);
+                    }
+                }));
+                optionsY += 24;
+            }
+            if (singleplayerEnabled()) {
+                this.addRenderableWidget(new ClassicButton(this.width / 2 - buttonWidth / 2, optionsY, buttonWidth, buttonHeight, Component.literal("Singleplayer"), new Button.OnPress() {
+                    public void onPress(Button button) {
+                        openSingleplayer(ClassicImpulseScreen.this);
+                    }
+                }));
+                optionsY += 24;
+            }
+            this.addRenderableWidget(new ClassicButton(this.width / 2 - buttonWidth / 2, optionsY, buttonWidth, buttonHeight, Component.literal("Options"), new Button.OnPress() {
                 public void onPress(Button button) {
                     Minecraft minecraft = Minecraft.getInstance();
                     minecraft.setScreen(new OptionsScreen(ClassicImpulseScreen.this, minecraft.options));
+                }
+            }));
+            this.addRenderableWidget(new ClassicButton(this.width / 2 - buttonWidth / 2, optionsY + 24, buttonWidth, buttonHeight, Component.literal("Quit"), new Button.OnPress() {
+                public void onPress(Button button) {
+                    quitGame();
                 }
             }));
         }
@@ -339,6 +459,7 @@ public final class ImpulseClient120 {
         public void tick() {
             super.tick();
             this.ticksOpen++;
+            updatePlayButton();
             if (this.ticksOpen > 2 && shouldAutoConnect()) {
                 connect();
             }
@@ -355,10 +476,12 @@ public final class ImpulseClient120 {
             String serverIp = host + ":" + serverPort;
             Minecraft minecraft = Minecraft.getInstance();
             ServerData serverData = new ServerData("Impulse", serverIp, false);
+            ImpulseRpcReporter.report("connecting", "Connecting", "", false);
             ConnectScreen.startConnecting(this, minecraft, ServerAddress.parseString(serverIp), serverData, false);
         }
 
         public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+            updatePlayButton();
             super.render(graphics, mouseX, mouseY, partialTick);
             graphics.blit(LOGO, 8, 8, 24, 24, 0.0F, 0.0F, 256, 256, 256, 256);
             if (this.error != null) {
@@ -368,6 +491,12 @@ public final class ImpulseClient120 {
 
         public boolean isPauseScreen() {
             return false;
+        }
+
+        private void updatePlayButton() {
+            if (this.playButton != null) {
+                this.playButton.setMessage(playComponent());
+            }
         }
 
         private Component playComponent() {

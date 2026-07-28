@@ -77,6 +77,8 @@ function createProfileManifest(overrides = {}) {
       title: overrides.menu?.title || 'IMPULSE',
       subtitle: overrides.menu?.subtitle || 'A focused way into your server',
       hide_server_name_from_play_button: boolValue(overrides.menu?.hide_server_name_from_play_button ?? overrides.menu?.hideServerNameFromPlayButton, false),
+      singleplayer_enabled: boolValue(overrides.menu?.singleplayer_enabled ?? overrides.menu?.singleplayerEnabled, false),
+      multiplayer_enabled: boolValue(overrides.menu?.multiplayer_enabled ?? overrides.menu?.multiplayerEnabled, false),
     },
 
     // Mod list
@@ -300,7 +302,7 @@ class ProfileManager {
     const menuChanged = serverManifest.menu !== undefined && JSON.stringify(serverManifest.menu || {}) !== JSON.stringify(profile.menu || {});
     const serverChanged = serverManifest.server !== undefined && JSON.stringify(serverManifest.server || {}) !== JSON.stringify(profile.server || {});
     const modsChanged = serverManifest.mods !== undefined && !sameFileList(
-      profile.mods.filter((mod) => mod.required !== false),
+      profile.allow_user_mods ? profile.mods.filter((mod) => mod.required !== false) : profile.mods,
       serverManifest.mods
     );
     const resourcePacksChanged = serverManifest.resourcePacks !== undefined && !sameFileList(profile.resourcePacks, serverManifest.resourcePacks);
@@ -322,17 +324,17 @@ class ProfileManager {
     }
 
     if (serverManifest.name !== undefined && serverManifest.name !== profile.name) {
-      changes.push(`Nom: ${profile.name} → ${serverManifest.name}`);
+      changes.push(`Name: ${profile.name} -> ${serverManifest.name}`);
       profile.name = serverManifest.name;
     }
 
     // Update minecraft version/loader if changed
     if (serverManifest.minecraft) {
       if (serverManifest.minecraft.version !== profile.minecraft.version) {
-        changes.push(`Version: ${profile.minecraft.version} → ${serverManifest.minecraft.version}`);
+        changes.push(`Version: ${profile.minecraft.version} -> ${serverManifest.minecraft.version}`);
       }
       if (serverManifest.minecraft.loader !== profile.minecraft.loader) {
-        changes.push(`Loader: ${profile.minecraft.loader} → ${serverManifest.minecraft.loader}`);
+        changes.push(`Loader: ${profile.minecraft.loader} -> ${serverManifest.minecraft.loader}`);
       }
       profile.minecraft = { ...profile.minecraft, ...serverManifest.minecraft };
     }
@@ -346,19 +348,20 @@ class ProfileManager {
       profile.menu = { ...(profile.menu || {}), ...serverManifest.menu };
     }
 
-    // Merge mods: keep user mods (required=false), replace server mods (required=true)
+    // Merge mods: server profiles replace all synced mods; custom profiles may keep user mods.
     if (serverManifest.mods) {
-      const userMods = profile.mods.filter(m => !m.required);
+      const keepUserMods = serverManifest.allow_user_mods !== false && profile.allow_user_mods;
+      const userMods = keepUserMods ? profile.mods.filter(m => !m.required) : [];
       const serverMods = serverManifest.mods.map(m => ({
         ...m,
         required: m.required !== undefined ? !!m.required : true,
       }));
       
       const addedMods = serverMods.filter(sm => !profile.mods.find(pm => pm.sha1 === sm.sha1));
-      const removedMods = profile.mods.filter(pm => pm.required && !serverMods.find(sm => sm.sha1 === pm.sha1));
+      const removedMods = profile.mods.filter(pm => !serverMods.find(sm => sm.sha1 === pm.sha1) && (!keepUserMods || pm.required));
       
-      if (addedMods.length) changes.push(`+${addedMods.length} mod(s) ajouté(s)`);
-      if (removedMods.length) changes.push(`-${removedMods.length} mod(s) retiré(s)`);
+      if (addedMods.length) changes.push(`+${addedMods.length} mod(s) added`);
+      if (removedMods.length) changes.push(`-${removedMods.length} mod(s) removed`);
 
       profile.mods = [...serverMods, ...userMods];
     }
@@ -366,11 +369,11 @@ class ProfileManager {
     // Replace resource packs and shaders from server
     if (serverManifest.resourcePacks) {
       profile.resourcePacks = serverManifest.resourcePacks;
-      changes.push('Resource packs mis à jour');
+      changes.push('Resource packs updated');
     }
     if (serverManifest.shaderPacks) {
       profile.shaderPacks = serverManifest.shaderPacks;
-      changes.push('Shaders mis à jour');
+      changes.push('Shaders updated');
     }
 
     // Update admin control flags

@@ -107,7 +107,7 @@ class CacheManager {
    * Download a file and store it in the cache
    * Returns { sha1, cached } where cached=true if it was already in cache
    */
-  async downloadAndStore(category, url, sha1, ext, dispatcher) {
+  async downloadAndStore(category, url, sha1, ext, options = {}) {
     await this.init();
 
     // If we already have this hash, skip download
@@ -115,25 +115,68 @@ class CacheManager {
       return { sha1, cached: true };
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000);
-    const fetchOpts = { signal: controller.signal, ...(dispatcher ? { dispatcher } : {}) };
-    let response;
-    try {
-      response = await fetch(url, fetchOpts);
-      if (!response.ok) {
-        throw new Error(`Download failed: ${response.status} ${response.statusText} for ${url}`);
-      }
+    const dispatcher = options && typeof options.dispatch === 'function' ? options : options.dispatcher;
+    const timeoutMs = Math.max(30000, Number(options.timeout) || 120000);
+    const attempts = Math.max(1, Number(options.attempts) || 3);
+    const retryDelays = Array.isArray(options.retryDelays) && options.retryDelays.length
+      ? options.retryDelays
+      : [500, 1500, 3000];
+    const retryStatusCodes = new Set([408, 429, 500, 502, 503, 504, 521, 522, 524]);
+    let buffer;
+    let lastError;
 
-      var buffer = Buffer.from(await response.arrayBuffer());
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw new Error(`Download timed out after 60s for ${url}`);
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const isRetryable = (error) => {
+      if (retryStatusCodes.has(Number(error?.status))) return true;
+      if (Number(error?.status) >= 400) return false;
+      const message = String(error?.message || '').toLowerCase();
+      return error?.retryable === true
+        || error?.name === 'AbortError'
+        || /aborted|timeout|timed out|econnreset|econnrefused|enotfound|eai_again|network|fetch failed|socket|terminated/.test(message);
+    };
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      const fetchOpts = { signal: controller.signal, ...(dispatcher ? { dispatcher } : {}) };
+      try {
+        const response = await fetch(url, fetchOpts);
+        if (!response.ok) {
+          let details = '';
+          try {
+            details = await response.text();
+          } catch {
+            details = '';
+          }
+          const error = new Error(`Download failed: ${response.status} ${response.statusText} for ${url}${details ? ` (${details})` : ''}`);
+          error.status = response.status;
+          error.statusText = response.statusText;
+          throw error;
+        }
+
+        buffer = Buffer.from(await response.arrayBuffer());
+        lastError = null;
+        break;
+      } catch (error) {
+        if (error?.name === 'AbortError' || /aborted/i.test(error?.message || '')) {
+          lastError = new Error(`Download timed out after ${Math.round(timeoutMs / 1000)}s for ${url}`);
+          lastError.retryable = true;
+        } else {
+          lastError = error;
+        }
+        if (attempt >= attempts || !isRetryable(lastError)) break;
+        const delay = retryDelays[Math.min(attempt - 1, retryDelays.length - 1)];
+        options.onRetry?.({ attempt: attempt + 1, maxAttempts: attempts, delay, error: lastError, url });
+        await sleep(delay);
+      } finally {
+        clearTimeout(timeoutId);
       }
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
     }
+
+    if (!buffer) {
+      throw lastError || new Error(`Download failed for ${url}`);
+    }
+
     const computedSha1 = this.computeSha1(buffer);
 
     // Verify hash if provided

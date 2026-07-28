@@ -4,6 +4,7 @@ import com.impulse.common.ImpulseManifestServer;
 import com.impulse.common.ImpulseRuntimeDefaults;
 import net.minecraft.SharedConstants;
 import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.IEventBus;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.ModList;
 import net.neoforged.fml.common.Mod;
@@ -17,7 +18,7 @@ import java.lang.reflect.Method;
 
 @Mod("impulse")
 public final class ImpulseNeoForge121 {
-    public ImpulseNeoForge121() {
+    public ImpulseNeoForge121(IEventBus modEventBus) {
         NeoForge.EVENT_BUS.register(this);
         if (FMLEnvironment.dist == Dist.CLIENT) {
             try {
@@ -31,7 +32,7 @@ public final class ImpulseNeoForge121 {
     @SubscribeEvent
     public void serverStarted(ServerStartedEvent event) {
         if (FMLEnvironment.dist == Dist.DEDICATED_SERVER) {
-            ImpulseManifestServer.start(new File("."), runtimeDefaults(event.getServer()));
+            ImpulseManifestServer.start(new File("."), runtimeDefaults(event.getServer()), resolveImpulseJar());
         }
     }
 
@@ -62,6 +63,41 @@ public final class ImpulseNeoForge121 {
         }
     }
 
+    private static File resolveImpulseJar() {
+        try {
+            Object modFile = invokeWithArgs(ModList.get(), "getModFileById", new Class[] { String.class }, new Object[] { "impulse" });
+            if (modFile instanceof java.util.Optional) modFile = ((java.util.Optional<?>) modFile).orElse(null);
+            if (modFile == null) return null;
+
+            Object file = invoke(modFile, "getFile");
+            if (file == null) file = modFile;
+            if (file instanceof java.nio.file.Path) return pathToFile((java.nio.file.Path) file);
+
+            Object path = invoke(file, "getFilePath");
+            File resolved = path instanceof java.nio.file.Path ? pathToFile((java.nio.file.Path) path) : null;
+            if (resolved != null) return resolved;
+
+            path = invoke(file, "getPath");
+            resolved = path instanceof java.nio.file.Path ? pathToFile((java.nio.file.Path) path) : null;
+            if (resolved != null) return resolved;
+
+            Object secureJar = invoke(file, "getSecureJar");
+            path = invoke(secureJar, "getPrimaryPath");
+            resolved = path instanceof java.nio.file.Path ? pathToFile((java.nio.file.Path) path) : null;
+            if (resolved != null) return resolved;
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static File pathToFile(java.nio.file.Path path) {
+        try {
+            if (path != null && "file".equalsIgnoreCase(path.toUri().getScheme())) return path.toFile();
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
     private static String readString(Object target, String first, String second) {
         Object value = invoke(target, first);
         if (value == null) value = invoke(target, second);
@@ -85,6 +121,16 @@ public final class ImpulseNeoForge121 {
         try {
             Method method = target.getClass().getMethod(methodName);
             return method.invoke(target);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static Object invokeWithArgs(Object target, String methodName, Class[] types, Object[] args) {
+        if (target == null) return null;
+        try {
+            Method method = target.getClass().getMethod(methodName, types);
+            return method.invoke(target, args);
         } catch (Throwable ignored) {
             return null;
         }
