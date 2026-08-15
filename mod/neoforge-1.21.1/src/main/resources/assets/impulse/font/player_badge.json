@@ -1,0 +1,11 @@
+{
+  "providers": [
+    {
+      "type": "bitmap",
+      "file": "impulse:font/player_badge.png",
+      "ascent": 9,
+      "height": 10,
+      "chars": ["\ue000"]
+    }
+  ]
+}

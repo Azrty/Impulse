@@ -1,0 +1,135 @@
+buildscript {
+    repositories {
+        maven { url = 'https://maven.neoforged.net/releases' }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath 'net.neoforged.gradle:userdev:7.1.38'
+    }
+}
+
+apply plugin: 'java-library'
+apply plugin: 'net.neoforged.gradle.userdev'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+base {
+    archivesName = 'impulse-neoforge-1.21.1'
+}
+
+sourceSets.main.resources {
+    srcDir 'src/generated/resources'
+}
+
+def generatedMusicFont = layout.buildDirectory.dir('generated/resources/music-presence')
+sourceSets.main.resources.srcDir generatedMusicFont
+
+def generateMusicPresenceFont = tasks.register('generateMusicPresenceFont') {
+    outputs.dir generatedMusicFont
+    doLast {
+        def root = generatedMusicFont.get().asFile
+        def fontDirectory = new File(root, 'assets/impulse/font')
+        def textureDirectory = new File(root, 'assets/impulse/textures/font')
+        fontDirectory.mkdirs()
+        textureDirectory.mkdirs()
+
+        def image = new java.awt.image.BufferedImage(32, 8, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        def frames = [[2, 5, 7], [5, 7, 3], [7, 3, 5], [4, 6, 2]]
+        frames.eachWithIndex { heights, frame ->
+            heights.eachWithIndex { height, bar ->
+                int x = frame * 8 + 1 + bar * 2
+                for (int px = x; px < x + 2; px++) {
+                    for (int y = 8 - height; y < 8; y++) image.setRGB(px, y, 0xFFFFFFFF as int)
+                }
+            }
+        }
+        javax.imageio.ImageIO.write(image, 'png', new File(textureDirectory, 'music_presence.png'))
+        new File(fontDirectory, 'music_presence.json').setText('''{
+  "providers": [
+    {
+      "type": "bitmap",
+      "file": "impulse:font/music_presence.png",
+      "ascent": 7,
+      "height": 8,
+      "chars": ["\\ue001\\ue002\\ue003\\ue004"]
+    }
+  ]
+}
+''', 'UTF-8')
+    }
+}
+
+sourceSets.main.java {
+    srcDir '../modern-1.21-client/src/main/java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'net.neoforged:neoforge:21.1.243'
+    implementation project(':common')
+}
+
+evaluationDependsOn(':standalone-ui')
+def standaloneUi = project(':standalone-ui')
+def standaloneUiRuntime = standaloneUi.configurations.runtimeClasspath
+
+def runtimeJar = tasks.register('runtimeJar', Jar) {
+    archiveClassifier = 'runtime'
+    from sourceSets.main.output
+    from project(':common').sourceSets.main.output
+    exclude 'com/impulse/bootstrap/**'
+    exclude 'META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator'
+}
+
+tasks.named('jar', Jar).configure {
+    dependsOn runtimeJar, standaloneUi.tasks.named('jar')
+    manifest {
+        attributes 'Automatic-Module-Name': 'com.impulse.bootstrap'
+    }
+    from project(':common').sourceSets.main.output
+    include 'com/impulse/bootstrap/**'
+    include 'META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator'
+    include 'impulse-runtime.embedded'
+    include '*-runtime.jar'
+    include 'impulse-standalone-ui/**'
+    include '*.jar'
+    include 'icon-mono.png'
+    include 'bg_000.jpg'
+    from(runtimeJar.flatMap { it.archiveFile }) {
+        rename { 'impulse-runtime.embedded' }
+    }
+    from(standaloneUi.tasks.named('jar').flatMap { it.archiveFile }) {
+        into 'impulse-standalone-ui'
+    }
+    from(standaloneUiRuntime) {
+        into 'impulse-standalone-ui/lib'
+    }
+    from(rootProject.file('../app/assets/icon-mono.png')) {
+        into 'impulse-standalone-ui/assets'
+        rename { 'logo.png' }
+    }
+    from('src/main/resources/assets/impulse/textures/gui/menu/bg_000.jpg') {
+        into 'impulse-standalone-ui/assets'
+        rename { 'background.jpg' }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    dependsOn generateMusicPresenceFont
+    inputs.property 'version', project.version
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand 'version': project.version
+    }
+}

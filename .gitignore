@@ -1,0 +1,8 @@
+app/node_modules/
+app/dist/
+app/dist_electron/
+mod/.gradle/
+mod/.release-tools/
+mod/dist/
+mod/**/.gradle/
+mod/**/build/

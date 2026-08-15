@@ -1,0 +1,12 @@
+[
+  {
+    "modid": "impulse",
+    "name": "Impulse",
+    "description": "Serves Impulse launcher manifests and server mod files.",
+    "version": "${version}",
+    "mcversion": "1.12.2",
+    "url": "",
+    "authorList": ["Impulse"],
+    "acceptableRemoteVersions": "*"
+  }
+]

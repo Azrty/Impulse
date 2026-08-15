@@ -1,0 +1,59 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.version('3.4')) {
+        compile 'com.google.code.gson:gson:2.2.4'
+    } else {
+        implementation 'com.google.code.gson:gson:2.2.4'
+    }
+}
+
+if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.version('5.0')) {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+} else {
+    java {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+}
+
+tasks.withType(JavaCompile).all {
+    options.encoding = 'UTF-8'
+}
+
+tasks.withType(Test).all {
+    if (it.hasProperty('failOnNoDiscoveredTests')) {
+        failOnNoDiscoveredTests = false
+    }
+}
+
+task runManifestServerEncodingTest(type: JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.version('6.4')) {
+        main = 'com.impulse.common.ImpulseManifestServerEncodingTest'
+    } else {
+        mainClass = 'com.impulse.common.ImpulseManifestServerEncodingTest'
+    }
+}
+
+check.dependsOn runManifestServerEncodingTest
+
+task runModUpdaterTest(type: JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.version('6.4')) {
+        main = 'com.impulse.common.ImpulseModUpdaterTest'
+    } else {
+        mainClass = 'com.impulse.common.ImpulseModUpdaterTest'
+    }
+}
+
+check.dependsOn runModUpdaterTest

@@ -1,0 +1,35 @@
+info:
+  name: "Impulse Mod Manager"
+  identifier: "impulsemodmanager"
+  description: "Modrinth-powered Forge and NeoForge mod management for Impulse servers."
+  flags: ""
+  version: "0.3.1"
+  target: "beta-2026-06"
+  author: "Impulse"
+  icon: ""
+  website: "https://impulse.epivalent.com"
+
+admin:
+  view: "admin/view.blade.php"
+  controller: "admin/controller.php"
+  css: ""
+  wrapper: ""
+
+dashboard:
+  css: ""
+  wrapper: ""
+  components: "components"
+
+data:
+  directory: "data"
+  public: ""
+  console: ""
+
+requests:
+  views: ""
+  app: "app"
+  routers:
+    client: "routes/client.php"
+
+database:
+  migrations: "migrations"
