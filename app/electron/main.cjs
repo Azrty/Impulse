@@ -53,6 +53,7 @@ const INTERNET_OFFLINE_CARD = {
   description: 'Impulse cannot reach the server or confirm your internet connection. Check your network, VPN, firewall, or Wi-Fi and try again.'
 };
 const UPDATE_FEED_URL = 'https://impulse.epivalent.com';
+const IMPULSE_MOD_INDEX_URL = 'https://impulse.epivalent.com/mods/index.json';
 const LEGAL_DOCUMENT_VERSION = '2026-08-15.3';
 const PRIVACY_POLICY_URL = 'https://impulsemc.com/privacy/';
 const TERMS_OF_SERVICE_URL = 'https://impulsemc.com/terms/';
@@ -66,6 +67,7 @@ let discordRpcConnecting = null;
 let discordCrashTimer = null;
 let updaterDownloadPromise = null;
 let consentDependentServicesStarted = false;
+let officialImpulseReleasesCache = { expiresAt: 0, releases: [] };
 
 function normalizeUpdateChannel(value) {
   return value === 'beta' ? 'beta' : 'stable';
@@ -1130,6 +1132,100 @@ function safeManifestFileName(value, fallback = 'mod.jar') {
   return fileName || fallback;
 }
 
+function isImpulseModEntry(mod) {
+  const id = String(mod?.id || mod?.mod_id || '').trim().toLowerCase();
+  const name = String(mod?.name || '').trim().toLowerCase();
+  const fileName = safeManifestFileName(mod?.file_name || '', '').toLowerCase();
+  return id === 'impulse'
+    || name === 'impulse'
+    || /^impulse(?:[-_.].*)?\.jar$/i.test(fileName);
+}
+
+function compareModVersions(left, right) {
+  const parse = (value) => String(value || '').split(/[.-]/).map((part) => /^\d+$/.test(part) ? Number(part) : part);
+  const a = parse(left);
+  const b = parse(right);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const av = a[index] ?? 0;
+    const bv = b[index] ?? 0;
+    if (av === bv) continue;
+    if (typeof av === 'number' && typeof bv === 'number') return av - bv;
+    if (typeof av === 'number') return 1;
+    if (typeof bv === 'number') return -1;
+    return String(av).localeCompare(String(bv));
+  }
+  return 0;
+}
+
+async function officialImpulseReleases(timeoutMs) {
+  if (officialImpulseReleasesCache.expiresAt > Date.now()) return officialImpulseReleasesCache.releases;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(3000, timeoutMs));
+  try {
+    const response = await fetch(IMPULSE_MOD_INDEX_URL, {
+      signal: controller.signal,
+      cache: 'no-store',
+      headers: { Accept: 'application/json', 'User-Agent': 'ImpulseLauncher/1.1' }
+    });
+    if (!response.ok) throw new Error(`official mod index returned HTTP ${response.status}`);
+    const index = await response.json();
+    if (!Array.isArray(index?.releases)) throw new Error('official mod index is invalid');
+    officialImpulseReleasesCache = { expiresAt: Date.now() + 5 * 60 * 1000, releases: index.releases };
+    return index.releases;
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('official Impulse mod lookup timed out');
+    throw new Error(`Unable to find the latest official Impulse mod: ${error.message || error}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function latestOfficialImpulseMod(minecraft, timeoutMs) {
+  const releases = await officialImpulseReleases(timeoutMs);
+  const release = releases
+    .filter((item) => String(item?.minecraft_version) === String(minecraft.version))
+    .filter((item) => String(item?.loader || '').toLowerCase() === String(minecraft.loader || '').toLowerCase())
+    .filter((item) => (item?.channel || (String(item?.version || '').includes('-') ? 'beta' : 'stable')) === 'stable')
+    .sort((left, right) => compareModVersions(right.version, left.version))[0];
+  if (!release) {
+    throw new Error(`No official Impulse mod is available for Minecraft ${minecraft.version} ${minecraft.loader}.`);
+  }
+  const sha1 = String(release.sha1 || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(sha1)) throw new Error(`Official Impulse ${release.version} is missing its SHA1 checksum.`);
+  let downloadUrl;
+  try {
+    const parsed = new URL(String(release.download_url || ''));
+    if (parsed.protocol !== 'https:' || parsed.origin !== UPDATE_FEED_URL || !parsed.pathname.startsWith('/mods/')) throw new Error('invalid origin');
+    downloadUrl = parsed.toString();
+  } catch {
+    throw new Error(`Official Impulse ${release.version} has an invalid download URL.`);
+  }
+  return {
+    id: 'impulse',
+    name: 'Impulse',
+    description: `Official Impulse client mod ${release.version}.`,
+    file_name: safeManifestFileName(release.file_name || `impulse-${minecraft.loader}-${minecraft.version}-${release.version}.jar`),
+    download_url: downloadUrl,
+    sha1,
+    sha256: String(release.sha256 || '').trim().toLowerCase() || null,
+    size: Number(release.size || 0),
+    required: true,
+    source: 'impulse-official',
+    category_id: null,
+    dependencies: [],
+    conflicts: []
+  };
+}
+
+async function useLatestOfficialImpulseMod(manifest, timeoutMs) {
+  const officialMod = await latestOfficialImpulseMod(manifest.minecraft, timeoutMs);
+  return {
+    ...manifest,
+    mods: [...(manifest.mods || []).filter((mod) => !isImpulseModEntry(mod)), officialMod],
+    optional_mods: (manifest.optional_mods || []).filter((mod) => !isImpulseModEntry(mod))
+  };
+}
+
 function normalizeManifestMod(mod, host, manifestPort, fallbackPath, requiredFallback) {
   const fileName = safeManifestFileName(mod.file_name || mod.name || 'mod.jar');
   const stableId = String(mod.id || mod.mod_id || mod.sha1 || fileName).trim().toLowerCase();
@@ -1288,7 +1384,8 @@ async function fetchManifest(host, port, manifestPort, timeoutMs = getNetworkTim
       headers: { Accept: 'application/json', 'User-Agent': 'ImpulseLauncher/0.1' }
     });
     if (!response.ok) throw new Error(`Manifest returned HTTP ${response.status}`);
-    return normalizeManifest(await response.json(), host, port, manifestPort);
+    const manifest = normalizeManifest(await response.json(), host, port, manifestPort);
+    return await useLatestOfficialImpulseMod(manifest, timeoutMs);
   } catch (error) {
     if (error?.name === 'AbortError' || /aborted/i.test(error?.message || '')) {
       throw new Error(`Manifest request timed out after ${Math.round(timeoutMs / 1000)}s: ${url}`);

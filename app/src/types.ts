@@ -5,6 +5,7 @@ export interface ImpulseMod {
   file_name: string;
   download_url: string | null;
   sha1: string | null;
+  sha256?: string | null;
   size: number;
   required: boolean;
   source?: string;
