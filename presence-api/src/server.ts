@@ -19,6 +19,7 @@ type Challenge = {
 
 type TokenPayload = {
   sub: string;
+  offline?: string;
   exp: number;
   iat: number;
   jti: string;
@@ -46,6 +47,13 @@ function base64url(value: string | Buffer): string {
 function normalizeUuid(value: string): string | null {
   const compact = value.replaceAll('-', '').toLowerCase();
   return /^[0-9a-f]{32}$/.test(compact) ? compact : null;
+}
+
+export function minecraftOfflineUuid(username: string): string {
+  const bytes = crypto.createHash('md5').update(`OfflinePlayer:${username}`, 'utf8').digest();
+  bytes[6] = (bytes[6] & 0x0f) | 0x30;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return bytes.toString('hex');
 }
 
 function sanitizeMusicField(value: unknown): string | null {
@@ -95,7 +103,10 @@ function verifyToken(token: string, secret: string, nowSeconds: number): TokenPa
   if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) return null;
   try {
     const payload = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')) as TokenPayload;
-    return normalizeUuid(payload.sub) && payload.exp > nowSeconds ? payload : null;
+    const subject = normalizeUuid(payload.sub);
+    const offline = payload.offline === undefined ? undefined : normalizeUuid(payload.offline);
+    if (!subject || (payload.offline !== undefined && !offline) || payload.exp <= nowSeconds) return null;
+    return { ...payload, sub: subject, ...(offline ? { offline } : {}) };
   } catch {
     return null;
   }
@@ -120,6 +131,7 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   const verifyMojang = options.verifyMojang ?? defaultMojangVerifier;
   const challenges = new Map<string, Challenge>();
   const presence = new Map<string, PresenceEntry>();
+  const presenceAliases = new Map<string, string>();
   const artwork = new Map<string, ArtworkEntry>();
   const tokenRates = new Map<string, RateBucket>();
 
@@ -165,6 +177,9 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     for (const [uuid, entry] of presence) {
       if (entry.expiresAt <= current) presence.delete(uuid);
       else if (entry.music && entry.music.expiresAt <= current) delete entry.music;
+    }
+    for (const [alias, source] of presenceAliases) {
+      if (!presence.has(source)) presenceAliases.delete(alias);
     }
     for (const [id, entry] of artwork) {
       if (entry.expiresAt <= current) artwork.delete(id);
@@ -213,7 +228,13 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
       return reply.code(401).send({ error: 'identity_not_verified' });
     }
     const issuedAt = Math.floor(now() / 1000);
-    const token = signToken({ sub: uuid, iat: issuedAt, exp: issuedAt + TOKEN_TTL_SECONDS, jti: crypto.randomUUID() }, options.secret);
+    const token = signToken({
+      sub: uuid,
+      offline: minecraftOfflineUuid(profile.name),
+      iat: issuedAt,
+      exp: issuedAt + TOKEN_TTL_SECONDS,
+      jti: crypto.randomUUID(),
+    }, options.secret);
     return { token, uuid, expires_in: TOKEN_TTL_SECONDS };
   });
 
@@ -253,6 +274,7 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
       }
     }
     presence.set(token.sub, next);
+    if (token.offline && token.offline !== token.sub) presenceAliases.set(token.offline, token.sub);
     const artworkMissing = Boolean(next.music?.artworkId && !artwork.has(next.music.artworkId));
     return { active: true, expires_in: 120, ...(artworkMissing ? { artwork_missing: true } : {}) };
   });
@@ -269,9 +291,15 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     cleanup();
     const requested = new Set(request.body.uuids.map((value) => typeof value === 'string' ? normalizeUuid(value) : null).filter(Boolean) as string[]);
     const current = now();
-    const active = [...requested].filter((uuid) => (presence.get(uuid)?.expiresAt ?? 0) > current);
+    const resolvePresence = (uuid: string): PresenceEntry | undefined => {
+      const direct = presence.get(uuid);
+      if (direct) return direct;
+      const source = presenceAliases.get(uuid);
+      return source ? presence.get(source) : undefined;
+    };
+    const active = [...requested].filter((uuid) => (resolvePresence(uuid)?.expiresAt ?? 0) > current);
     const music = active.flatMap((uuid) => {
-      const activity = presence.get(uuid)?.music;
+      const activity = resolvePresence(uuid)?.music;
       return activity && activity.expiresAt > current
         ? [{ uuid, title: activity.title, artist: activity.artist, ...(activity.artworkId ? { artwork_id: activity.artworkId } : {}) }]
         : [];

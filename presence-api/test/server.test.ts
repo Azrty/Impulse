@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import test from 'node:test';
-import { createPresenceServer } from '../src/server.js';
+import { createPresenceServer, minecraftOfflineUuid } from '../src/server.js';
 
 const SECRET = 'test-secret-that-is-definitely-longer-than-thirty-two-characters';
 const UUID = '39d9ec7970394f039078ad79e84ff976';
+
+test('matches Minecraft offline UUID generation', () => {
+  assert.equal(minecraftOfflineUuid('Notch'), 'b50ad385829d3141a2167e7d7539ba7f');
+});
 
 test('verifies a challenge and reports ephemeral presence', async () => {
   let clock = 1_000_000;
@@ -88,6 +92,42 @@ test('publishes sanitized short-lived music activity without history', async () 
   });
   assert.deepEqual(query.json().music, []);
   assert.deepEqual(query.json().active, [UUID]);
+  await app.close();
+});
+
+test('resolves verified premium presence through the standard offline-mode UUID', async () => {
+  const app = await createPresenceServer({
+    secret: SECRET,
+    logger: false,
+    verifyMojang: async () => ({ id: UUID, name: 'Azrty' }),
+  });
+  const challenge = (await app.inject({ method: 'POST', url: '/v1/auth/challenge', payload: {} })).json();
+  const verified = await app.inject({
+    method: 'POST',
+    url: '/v1/auth/verify',
+    payload: { challenge_id: challenge.challenge_id, username: 'Azrty' },
+  });
+  const headers = { authorization: `Bearer ${verified.json().token as string}` };
+  await app.inject({
+    method: 'POST',
+    url: '/v1/presence/heartbeat',
+    headers,
+    payload: { music: { title: 'Offline Server', artist: 'Premium Player' } },
+  });
+
+  const offlineUuid = minecraftOfflineUuid('Azrty');
+  const query = await app.inject({
+    method: 'POST',
+    url: '/v1/presence/query',
+    headers,
+    payload: { uuids: [offlineUuid] },
+  });
+  assert.deepEqual(query.json().active, [offlineUuid]);
+  assert.deepEqual(query.json().music, [{
+    uuid: offlineUuid,
+    title: 'Offline Server',
+    artist: 'Premium Player',
+  }]);
   await app.close();
 });
 
