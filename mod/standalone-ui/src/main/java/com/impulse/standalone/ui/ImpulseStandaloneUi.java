@@ -1358,7 +1358,7 @@ public final class ImpulseStandaloneUi extends Application {
             ImGui.text("Some server mods could not be independently verified");
             ImGui.spacing();
             ImGui.pushTextWrapPos(ImGui.getCursorPosX() + ImGui.getContentRegionAvailX());
-            ImGui.textColored(0.70F, 0.70F, 0.70F, 1.0F, "These files match the server's SHA-512 hashes, but Impulse could not match them to a compatible Modrinth or CurseForge release, or its recognized-mod registry. Mods can run code on your computer. Continue only if you trust this server.");
+            ImGui.textColored(0.70F, 0.70F, 0.70F, 1.0F, "Impulse confirmed that these files match the SHA-512 hashes declared by the server, but some could not be matched to a compatible Modrinth or CurseForge release, or the Impulse recognized-mod registry. Minecraft mods can run code on your computer. Continue only if you trust this server or have reviewed these files yourself.");
             ImGui.popTextWrapPos();
             ImGui.spacing();
             ImGui.separator();
