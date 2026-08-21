@@ -91,6 +91,27 @@ test('retries transient CurseForge failures', async () => {
   await app.close();
 });
 
+test('does not retry permanent CurseForge authentication failures', async () => {
+  let calls = 0;
+  const app = await createPresenceServer({
+    secret: SECRET,
+    logger: false,
+    curseForgeApiKey: 'impulse-test-key',
+    curseForgeFetch: async () => {
+      calls++;
+      return new Response('{}', { status: 401 });
+    },
+  });
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/mod-verification/curseforge',
+    payload: { minecraft_version: '1.21.1', loader: 'neoforge', files: [{ sha512: 'e'.repeat(128), fingerprint: 43 }] },
+  });
+  assert.equal(response.statusCode, 502);
+  assert.equal(calls, 1);
+  await app.close();
+});
+
 test('verifies a challenge and reports ephemeral presence', async () => {
   let clock = 1_000_000;
   const app = await createPresenceServer({

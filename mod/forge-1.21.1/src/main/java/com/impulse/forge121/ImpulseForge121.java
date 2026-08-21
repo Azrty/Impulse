@@ -90,7 +90,7 @@ public final class ImpulseForge121 {
         try {
             return ModList.get().getModContainerById("impulse").get().getModInfo().getVersion().toString();
         } catch (Throwable ignored) {
-            return "1.2.0-beta.1";
+            return "1.2.0-beta.2";
         }
     }
 

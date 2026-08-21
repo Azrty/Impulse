@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 
 const CHALLENGE_TTL_MS = 90_000;
@@ -52,6 +52,12 @@ type CurseForgeFile = {
   fileName?: string;
   gameVersions?: string[];
 };
+
+class CurseForgeRequestError extends Error {
+  constructor(message: string, readonly retryable: boolean) {
+    super(message);
+  }
+}
 
 function base64url(value: string | Buffer): string {
   return Buffer.from(value).toString('base64url');
@@ -141,10 +147,13 @@ async function queryCurseForgeFingerprints(
   apiKey: string,
   fingerprints: number[],
   requestFetch: typeof fetch,
+  logger: FastifyBaseLogger,
 ): Promise<Map<number, CurseForgeFile>> {
   let lastError: unknown = new Error('CurseForge verification failed.');
   for (let attempt = 0; attempt < 3; attempt++) {
+    const startedAt = Date.now();
     try {
+      logger.info({ attempt: attempt + 1, maxAttempts: 3, fingerprintCount: fingerprints.length }, 'Sending CurseForge fingerprint request');
       const response = await requestFetch('https://api.curseforge.com/v1/fingerprints/432', {
         method: 'POST',
         signal: AbortSignal.timeout(10_000),
@@ -158,11 +167,16 @@ async function queryCurseForgeFingerprints(
       });
       if (!response.ok) {
         const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
-        if (!retryable) throw new Error(`CurseForge returned HTTP ${response.status}.`);
+        if (!retryable) {
+          logger.warn({ attempt: attempt + 1, httpStatus: response.status, durationMs: Date.now() - startedAt }, 'CurseForge rejected fingerprint request');
+          throw new CurseForgeRequestError(`CurseForge returned HTTP ${response.status}.`, false);
+        }
         lastError = new Error(`CurseForge returned HTTP ${response.status}.`);
         if (attempt < 2) {
           const retryAfter = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
-          await new Promise((resolve) => setTimeout(resolve, Number.isFinite(retryAfter) ? Math.min(5_000, retryAfter * 1_000) : [250, 750][attempt]));
+          const retryDelayMs = Number.isFinite(retryAfter) ? Math.min(5_000, retryAfter * 1_000) : [250, 750][attempt];
+          logger.warn({ attempt: attempt + 1, httpStatus: response.status, retryDelayMs, durationMs: Date.now() - startedAt }, 'Retrying CurseForge fingerprint request');
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
           continue;
         }
         throw lastError;
@@ -172,11 +186,15 @@ async function queryCurseForgeFingerprints(
       for (const match of payload.data?.exactMatches ?? []) {
         if (Number.isSafeInteger(match.id) && match.file) result.set(Number(match.id), match.file);
       }
+      logger.info({ attempt: attempt + 1, httpStatus: response.status, exactMatchCount: result.size, durationMs: Date.now() - startedAt }, 'CurseForge fingerprint request completed');
       return result;
     } catch (error) {
       lastError = error;
+      if (error instanceof CurseForgeRequestError && !error.retryable) throw error;
       if (attempt < 2) {
-        await new Promise((resolve) => setTimeout(resolve, [250, 750][attempt]));
+        const retryDelayMs = [250, 750][attempt];
+        logger.warn({ attempt: attempt + 1, retryDelayMs, durationMs: Date.now() - startedAt, error }, 'Retrying CurseForge fingerprint request after network error');
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
         continue;
       }
     }
@@ -253,29 +271,42 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
       files.push({ sha512, fingerprint });
     }
     const apiKey = options.curseForgeApiKey?.trim();
-    if (!apiKey) return reply.code(503).send({ error: 'CurseForge verification is unavailable.' });
+    if (!apiKey) {
+      request.log.warn({ minecraftVersion, loader, fileCount: files.length }, 'CurseForge verification requested while integration is disabled');
+      return reply.code(503).send({ error: 'CurseForge verification is unavailable.' });
+    }
 
     const requestKey = JSON.stringify({ minecraftVersion, loader, fingerprints: [...new Set(files.map((file) => file.fingerprint))].sort((a, b) => a - b) });
     let pending = curseForgeRequests.get(requestKey);
+    request.log.info({ minecraftVersion, loader, fileCount: files.length, uniqueFingerprintCount: new Set(files.map((file) => file.fingerprint)).size }, 'CurseForge mod verification started');
     if (!pending) {
       pending = queryCurseForgeFingerprints(
         apiKey,
         [...new Set(files.map((file) => file.fingerprint))],
         options.curseForgeFetch ?? fetch,
+        request.log,
       ).finally(() => curseForgeRequests.delete(requestKey));
       curseForgeRequests.set(requestKey, pending);
+    } else {
+      request.log.info({ minecraftVersion, loader, fileCount: files.length }, 'Reusing in-flight CurseForge fingerprint request');
     }
     try {
       const exactMatches = await pending;
       const matches: Record<string, unknown> = {};
+      let compatibleCount = 0;
+      let incompatibleCount = 0;
+      let unverifiedCount = 0;
       for (const file of files) {
         const match = exactMatches.get(file.fingerprint);
         if (!match) {
           matches[file.sha512] = { status: 'Unverified' };
+          unverifiedCount++;
           continue;
         }
         const versions = Array.isArray(match.gameVersions) ? match.gameVersions.map((value) => String(value).toLowerCase()) : [];
         const compatible = versions.includes(minecraftVersion.toLowerCase()) && versions.includes(loader);
+        if (compatible) compatibleCount++;
+        else incompatibleCount++;
         matches[file.sha512] = {
           status: compatible ? 'Matched on CurseForge' : 'Incompatible CurseForge listing',
           project_id: Number.isSafeInteger(match.modId) ? match.modId : null,
@@ -283,6 +314,7 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
           file_name: typeof match.fileName === 'string' ? match.fileName : null,
         };
       }
+      request.log.info({ minecraftVersion, loader, fileCount: files.length, compatibleCount, incompatibleCount, unverifiedCount }, 'CurseForge mod verification completed');
       return { matches };
     } catch (error) {
       request.log.warn({ error }, 'CurseForge fingerprint verification failed');
