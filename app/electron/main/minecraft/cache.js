@@ -75,6 +75,19 @@ class CacheManager {
     return actual.toLowerCase() === String(expectedSha1).toLowerCase();
   }
 
+  computeSha512(buffer) {
+    return crypto.createHash('sha512').update(buffer).digest('hex');
+  }
+
+  async computeFileSha512(filePath) {
+    return this.computeSha512(await fs.readFile(filePath));
+  }
+
+  async verifyFileSha512(filePath, expectedSha512) {
+    const actual = await this.computeFileSha512(filePath);
+    return actual.toLowerCase() === String(expectedSha512).toLowerCase();
+  }
+
   /**
    * Store a file in the cache (from buffer)
    * Returns the SHA1 hash
@@ -107,12 +120,18 @@ class CacheManager {
    * Download a file and store it in the cache
    * Returns { sha1, cached } where cached=true if it was already in cache
    */
-  async downloadAndStore(category, url, sha1, ext, options = {}) {
+  async downloadAndStore(category, url, expectedHash, ext, options = {}) {
     await this.init();
+    const algorithm = options.algorithm === 'sha512' || String(expectedHash || '').length === 128 ? 'sha512' : 'sha1';
 
     // If we already have this hash, skip download
-    if (sha1 && await this.hasFile(category, sha1, ext)) {
-      return { sha1, cached: true };
+    if (expectedHash && await this.hasFile(category, expectedHash, ext)) {
+      const cachePath = this.getCachePath(category, expectedHash, ext);
+      const valid = algorithm === 'sha512'
+        ? await this.verifyFileSha512(cachePath, expectedHash).catch(() => false)
+        : await this.verifyFileSha1(cachePath, expectedHash).catch(() => false);
+      if (valid) return { hash: expectedHash, sha1: algorithm === 'sha1' ? expectedHash : null, sha512: algorithm === 'sha512' ? expectedHash : null, cached: true };
+      await fs.rm(cachePath, { force: true });
     }
 
     const dispatcher = options && typeof options.dispatch === 'function' ? options : options.dispatcher;
@@ -202,22 +221,22 @@ class CacheManager {
       throw lastError || new Error(`Download failed for ${url}`);
     }
 
-    const computedSha1 = this.computeSha1(buffer);
+    const computedHash = algorithm === 'sha512' ? this.computeSha512(buffer) : this.computeSha1(buffer);
 
     // Verify hash if provided
-    if (sha1 && computedSha1 !== sha1) {
-      throw new Error(`SHA1 mismatch: expected ${sha1}, got ${computedSha1}`);
+    if (expectedHash && computedHash !== expectedHash) {
+      throw new Error(`${algorithm.toUpperCase()} mismatch: expected ${expectedHash}, got ${computedHash}`);
     }
 
-    const finalSha1 = sha1 || computedSha1;
+    const finalHash = expectedHash || computedHash;
 
     // Already in cache check again (race condition guard)
-    if (await this.hasFile(category, finalSha1, ext)) {
-      return { sha1: finalSha1, cached: true };
+    if (await this.hasFile(category, finalHash, ext)) {
+      return { hash: finalHash, sha1: algorithm === 'sha1' ? finalHash : null, sha512: algorithm === 'sha512' ? finalHash : null, cached: true };
     }
 
-    await fs.writeFile(this.getCachePath(category, finalSha1, ext), buffer);
-    return { sha1: finalSha1, cached: false };
+    await fs.writeFile(this.getCachePath(category, finalHash, ext), buffer);
+    return { hash: finalHash, sha1: algorithm === 'sha1' ? finalHash : null, sha512: algorithm === 'sha512' ? finalHash : null, cached: false };
   }
 
   /**
@@ -286,7 +305,7 @@ class CacheManager {
 
     for (const item of items) {
       try {
-        await this.linkToProfile(item.category, item.sha1, item.ext, item.file_name, profileDir, {
+        await this.linkToProfile(item.category, item.sha512 || item.sha1, item.ext, item.file_name, profileDir, {
           copyInsteadOfSymlink: copyCategories.has(item.category),
         });
         results.linked++;
@@ -408,7 +427,7 @@ class CacheManager {
         const raw = await fs.readFile(jsonPath, 'utf8');
         const profile = JSON.parse(raw);
         for (const mod of (profile.mods || [])) {
-          if (mod.sha1) referencedHashes.add(mod.sha1);
+          if (mod.sha512 || mod.sha1) referencedHashes.add(mod.sha512 || mod.sha1);
         }
         for (const rp of (profile.resourcePacks || [])) {
           if (rp.sha1) referencedHashes.add(rp.sha1);
@@ -471,8 +490,8 @@ class CacheManager {
       try {
         const profile = JSON.parse(await fs.readFile(path.join(profilesDir, entry.name, 'profile.json'), 'utf8'));
         for (const item of [...(profile.mods || []), ...(profile.resourcePacks || []), ...(profile.shaderPacks || [])]) {
-          if (!item.sha1) continue;
-          const key = String(item.sha1).toLowerCase();
+          if (!item.sha512 && !item.sha1) continue;
+          const key = String(item.sha512 || item.sha1).toLowerCase();
           referenced.set(key, (referenced.get(key) || 0) + 1);
         }
       } catch {}
@@ -492,7 +511,7 @@ class CacheManager {
         const refs = referenced.get(hash) || 0;
         cacheBytes += stat.size;
         if (!refs) orphanBytes += stat.size;
-        cacheFiles.push({ category, filePath, fileName: entry.name, sha1: hash, size: stat.size, references: refs });
+        cacheFiles.push({ category, filePath, fileName: entry.name, hash, sha1: hash.length === 40 ? hash : null, sha512: hash.length === 128 ? hash : null, size: stat.size, references: refs });
       }
     }
 
@@ -505,9 +524,11 @@ class CacheManager {
     const corrupt = [];
     let checked = 0;
     for (const file of storage.cacheFiles) {
-      const actual = await this.computeFileSha1(file.filePath).catch(() => null);
+      const actual = file.sha512
+        ? await this.computeFileSha512(file.filePath).catch(() => null)
+        : await this.computeFileSha1(file.filePath).catch(() => null);
       checked += 1;
-      if (!actual || actual.toLowerCase() !== file.sha1) corrupt.push(file);
+      if (!actual || actual.toLowerCase() !== file.hash) corrupt.push(file);
       onProgress?.({ checked, total: storage.cacheFiles.length, fileName: file.fileName });
     }
     return { checked, corrupt, valid: checked - corrupt.length };

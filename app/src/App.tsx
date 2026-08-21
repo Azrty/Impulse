@@ -77,7 +77,24 @@ function progressPercent(progress?: LaunchProgress) {
 }
 
 function optionalModKey(mod: ImpulseMod) {
-  return String(mod.sha1 || mod.file_name || mod.name || '').toLowerCase();
+  return String(mod.sha512 || mod.sha1 || mod.file_name || mod.name || '').toLowerCase();
+}
+
+const MOD_VERIFICATION_WARNING_TITLE = 'Some server mods could not be independently verified';
+const MOD_VERIFICATION_WARNING_BODY = 'Impulse confirmed that these files match the SHA-512 hashes declared by the server, but some could not be matched to a compatible Modrinth or CurseForge release, or the Impulse recognized-mod registry. Minecraft mods can run code on your computer. Continue only if you trust this server or have reviewed these files yourself.';
+const OUTDATED_HASH_MESSAGE = 'This server uses an outdated mod manifest that does not provide SHA-512 hashes. Ask the server owner to update Impulse.';
+
+function launchMods(server: SavedServer) {
+  const selected = server.optionalModSelections || {};
+  return [...(server.manifest.mods || []), ...(server.manifest.optional_mods || []).filter((mod) => selected[optionalModKey(mod)] === true)];
+}
+
+function problematicMods(server: SavedServer) {
+  return launchMods(server).filter((mod) => !['Matched on Modrinth', 'Matched on CurseForge', 'Recognized by Impulse', 'Pending CurseForge verification'].includes(mod.verification?.status || 'Verification unavailable'));
+}
+
+function problematicSignature(server: SavedServer) {
+  return problematicMods(server).map((mod) => `${mod.sha512}:${mod.verification?.status || 'Verification unavailable'}`).sort().join('|');
 }
 
 type OptionalModGroup = OptionalModCategory & { mods: ImpulseMod[] };
@@ -1380,6 +1397,14 @@ function ServerDetail({
               <div className="text-white/45">Manifest Endpoint</div>
               <div>{server.host}:{server.manifestPort}</div>
             </div>
+            <div>
+              <div className="text-white/45">Manifest Security</div>
+              {server.manifestPublicKey ? (
+                <div><span className="text-emerald-200">Ed25519 verified</span><span className="mt-1 block break-all font-mono text-[10px] text-white/35">{server.manifest.security?.fingerprint || 'Pinned signing key'}</span></div>
+              ) : (
+                <div className="text-amber-200">Unsigned legacy server</div>
+              )}
+            </div>
             <label className="block">
               <span className="text-white/45">Crash report sharing</span>
               <select
@@ -1401,6 +1426,7 @@ function ServerDetail({
           <button onClick={async () => {
             const optional = (manifest.optional_mods || []).filter((mod) => optionalSelections[optionalModKey(mod)]).map((mod) => mod.id).join(',');
             const params = new URLSearchParams({ address: `${server.host}:${server.port}`, manifest_port: String(server.manifestPort), action: 'add' });
+            if (server.manifestPublicKey) params.set('manifest_key', server.manifestPublicKey);
             if (optional) params.set('optional', optional);
             await navigator.clipboard.writeText(`impulse://server?${params.toString()}`);
             setInviteCopied(true); window.setTimeout(() => setInviteCopied(false), 1500);
@@ -1541,6 +1567,10 @@ function InvitationModal({ state, onClose, onConfirm }: {
             <div className="flex items-center gap-3 border border-white/10 p-4">{state.server.manifest.icon_url ? <img src={state.server.manifest.icon_url} alt="" className="h-12 w-12 object-cover" /> : <Server size={28} />}<div className="min-w-0"><h3 className="truncate font-semibold">{state.server.manifest.name}</h3><p className="text-sm text-white/45">{state.server.host}:{state.server.port}</p></div></div>
             <div className="grid grid-cols-2 gap-px border border-white/10 bg-white/10 text-xs"><div className="bg-black p-3"><span className="text-white/40">Loader</span><p className="mt-1">{state.server.manifest.minecraft.loader === 'neoforge' ? 'NeoForge' : 'Forge'} {state.server.manifest.minecraft.loader_version}</p></div><div className="bg-black p-3"><span className="text-white/40">Required mods</span><p className="mt-1">{state.server.manifest.mods.length}</p></div></div>
             {state.invitation.optional.length > 0 && <label className="flex cursor-pointer items-start gap-3 border border-white/10 p-3 text-sm"><input type="checkbox" checked={acceptSuggested} onChange={(event) => setAcceptSuggested(event.target.checked)} className="mt-1 accent-white" /><span><strong>Accept suggested optional mods</strong><span className="mt-1 block text-xs text-white/45">Enable {state.invitation.optional.length} suggested option{state.invitation.optional.length === 1 ? '' : 's'}. Existing choices remain unchanged unless accepted.</span></span></label>}
+            <div className={`border p-3 text-sm ${state.server.manifestPublicKey ? 'border-emerald-300/20 text-emerald-100' : 'border-amber-300/20 text-amber-100'}`}>
+              <strong>{state.server.manifestPublicKey ? 'Ed25519 signature verified' : 'Unsigned legacy server'}</strong>
+              <span className="mt-1 block text-xs opacity-65">{state.server.manifestPublicKey ? `Signing key: ${state.server.manifest.security?.fingerprint || 'verified'}` : 'This server does not cryptographically sign its manifest. Only continue if you trust this address.'}</span>
+            </div>
             <div className="flex justify-end gap-2"><button onClick={onClose} className="h-10 border border-white/15 px-4 text-sm hover:bg-white/10">Cancel</button><button onClick={() => onConfirm(acceptSuggested)} className="h-10 bg-white px-4 text-sm font-medium text-black hover:bg-white/85">{state.invitation.action === 'launch' ? 'Add and Launch' : 'Add Server'}</button></div>
           </div>
         ) : null}
@@ -1605,6 +1635,64 @@ function OutdatedImpulseModal({ server, onCancel, onContinue }: {
   );
 }
 
+function UnsignedManifestModal({ server, onCancel, onContinue }: {
+  server: SavedServer;
+  onCancel: () => void;
+  onContinue: () => void;
+}) {
+  const [seconds, setSeconds] = useState(3);
+
+  useEffect(() => {
+    if (seconds <= 0) return;
+    const timer = window.setTimeout(() => setSeconds((current) => Math.max(0, current - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [seconds]);
+
+  return (
+    <div className="fixed inset-0 z-[85] grid place-items-center bg-black/80 p-5 backdrop-blur-sm">
+      <div className="w-full max-w-md border border-amber-300/20 bg-[#080808] shadow-2xl">
+        <div className="flex items-start gap-3 border-b border-white/10 p-5">
+          <div className="grid h-9 w-9 shrink-0 place-items-center border border-amber-300/25 bg-amber-200/[0.06] text-amber-100"><AlertTriangle size={18} /></div>
+          <div className="min-w-0">
+            <h2 className="font-semibold">This server manifest is not signed</h2>
+            <p className="mt-2 text-sm leading-5 text-white/55">
+              Impulse cannot verify that this manifest really came from {server.manifest.name}. A modified manifest could make the launcher download untrusted files. Only continue if you trust this server and its network.
+            </p>
+            <p className="mt-3 break-all font-mono text-xs text-white/35">{server.host}:{server.manifestPort}</p>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 p-5">
+          <button onClick={onCancel} className="h-10 border border-white/15 px-4 text-sm hover:bg-white/10">Cancel</button>
+          <button
+            disabled={seconds > 0}
+            onClick={onContinue}
+            className="h-10 min-w-36 bg-white px-4 text-sm font-medium text-black hover:bg-white/85 disabled:cursor-not-allowed disabled:bg-white/15 disabled:text-white/45"
+          >
+            {seconds > 0 ? `Ignore (${seconds})` : 'Ignore and Play'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ModVerificationModal({ server, onCancel, onContinue }: { server: SavedServer; onCancel: () => void; onContinue: () => void }) {
+  const [seconds, setSeconds] = useState(5);
+  const mods = problematicMods(server);
+  useEffect(() => {
+    if (seconds <= 0) return;
+    const timer = window.setTimeout(() => setSeconds((value) => Math.max(0, value - 1)), 1000);
+    return () => window.clearTimeout(timer);
+  }, [seconds]);
+  return <div className="fixed inset-0 z-[90] grid place-items-center bg-black/80 p-5 backdrop-blur-sm">
+    <div className="flex max-h-[80vh] w-full max-w-2xl flex-col border border-amber-300/20 bg-[#080808] shadow-2xl">
+      <div className="border-b border-white/10 p-5"><h2 className="font-semibold">{MOD_VERIFICATION_WARNING_TITLE}</h2><p className="mt-2 text-sm leading-5 text-white/55">{MOD_VERIFICATION_WARNING_BODY}</p></div>
+      <div className="min-h-0 overflow-y-auto p-3">{mods.map((mod) => <div key={mod.sha512 || mod.file_name} className="border-b border-white/10 p-3 last:border-0"><div className="flex justify-between gap-3"><strong className="min-w-0 text-sm">{mod.name}</strong><span className="shrink-0 text-xs text-amber-100">{mod.verification?.status || 'Verification unavailable'}</span></div><p className="mt-1 break-all text-xs text-white/45">{mod.file_name}</p><button onClick={() => navigator.clipboard.writeText(mod.sha512 || '')} className="mt-2 block w-full break-all text-left font-mono text-[10px] leading-4 text-white/35 hover:text-white/65" title="Copy SHA-512"><span className="mr-2 text-white/50">SHA-512</span>{mod.sha512}</button></div>)}</div>
+      <div className="flex justify-end gap-2 border-t border-white/10 p-5"><button onClick={onCancel} className="h-10 border border-white/15 px-4 text-sm hover:bg-white/10">Cancel</button><button disabled={seconds > 0} onClick={onContinue} className="h-10 min-w-44 bg-white px-4 text-sm font-medium text-black disabled:bg-white/15 disabled:text-white/45">{seconds > 0 ? `Continue anyway (${seconds})` : 'Continue anyway'}</button></div>
+    </div>
+  </div>;
+}
+
 export default function App() {
   const [legalChecked, setLegalChecked] = useState(false);
   const [legalAccepted, setLegalAccepted] = useState(false);
@@ -1626,6 +1714,8 @@ export default function App() {
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [optionalPromptServer, setOptionalPromptServer] = useState<SavedServer | null>(null);
   const [outdatedImpulsePromptServer, setOutdatedImpulsePromptServer] = useState<SavedServer | null>(null);
+  const [unsignedManifestPromptServer, setUnsignedManifestPromptServer] = useState<SavedServer | null>(null);
+  const [modVerificationPromptServer, setModVerificationPromptServer] = useState<SavedServer | null>(null);
   const [invitationPreview, setInvitationPreview] = useState<{ loading: boolean; error?: string; invitation?: ImpulseInvitation; server?: SavedServer } | null>(null);
 
   useEffect(() => {
@@ -1799,6 +1889,12 @@ export default function App() {
       return;
     }
     if (!result?.success) {
+      if (result?.verificationRequired && result.server) {
+        setServers((current) => current.map((server) => server.id === result.server.id ? result.server : server));
+        setProgress(null);
+        setModVerificationPromptServer(result.server);
+        return;
+      }
       if (result?.error === 'The server is offline') {
         setProgress({ status: 'server-offline', message: 'The server is offline', progress: 0, total: 100, details: result.details });
         setLaunchError(null);
@@ -1848,7 +1944,19 @@ export default function App() {
     return refreshedServer;
   };
 
-  const proceedWithLaunch = async (server: SavedServer) => {
+  const proceedWithLaunch = async (server: SavedServer, unsignedAccepted = false) => {
+    if (launchMods(server).some((mod) => !/^[0-9a-f]{128}$/i.test(mod.sha512 || ''))) {
+      setProgress(null); setLaunchError(OUTDATED_HASH_MESSAGE); setLaunchingId(null); return;
+    }
+    const verificationSignature = problematicSignature(server);
+    if (verificationSignature && verificationSignature !== server.acceptedUnverifiedModSignature) {
+      setProgress(null); setModVerificationPromptServer(server); return;
+    }
+    if (server.manifest.security?.signed !== true && !unsignedAccepted) {
+      setProgress(null);
+      setUnsignedManifestPromptServer(server);
+      return;
+    }
     if (needsOptionalPrompt(server)) {
       setProgress(null);
       setOptionalPromptServer(server);
@@ -1880,7 +1988,7 @@ export default function App() {
     const preview = invitationPreview;
     if (!preview?.server || !preview.invitation) return;
     const invitation = preview.invitation;
-    const result = await window.api?.addServer({ address: invitation.address, manifestPort: invitation.manifestPort });
+    const result = await window.api?.addServer({ address: invitation.address, manifestPort: invitation.manifestPort, manifestKey: invitation.manifestKey });
     if (!result?.success || !result.server) { setInvitationPreview({ ...preview, loading: false, error: result?.error || 'Unable to add this server.' }); return; }
     let saved = result.server;
     if (result.servers) setServers(result.servers);
@@ -1894,8 +2002,7 @@ export default function App() {
     if (invitation.action === 'launch') {
       setLaunchingId(saved.id);
       if (usesOlderImpulseMinor(saved)) setOutdatedImpulsePromptServer(saved);
-      else if (!acceptSuggested && needsOptionalPrompt(saved)) setOptionalPromptServer(saved);
-      else await continueLaunch(saved.id);
+      else await proceedWithLaunch(saved);
     }
   };
 
@@ -2094,6 +2201,21 @@ export default function App() {
               }}
             />
           )}
+          {unsignedManifestPromptServer && (
+            <UnsignedManifestModal
+              server={unsignedManifestPromptServer}
+              onCancel={() => {
+                setUnsignedManifestPromptServer(null);
+                setLaunchingId(null);
+              }}
+              onContinue={() => {
+                const server = unsignedManifestPromptServer;
+                setUnsignedManifestPromptServer(null);
+                void proceedWithLaunch(server, true);
+              }}
+            />
+          )}
+          {modVerificationPromptServer && <ModVerificationModal server={modVerificationPromptServer} onCancel={() => { setModVerificationPromptServer(null); setLaunchingId(null); }} onContinue={async () => { const server = modVerificationPromptServer; const signature = problematicSignature(server); const result = await window.api?.acceptUnverifiedMods(server.id, signature); setModVerificationPromptServer(null); if (!result?.success || !result.server) { setLaunchError(result?.error || 'Unable to save mod verification choice.'); setLaunchingId(null); return; } if (result.servers) setServers(result.servers); await proceedWithLaunch(result.server); }} />}
           {invitationPreview && <InvitationModal state={invitationPreview} onClose={() => setInvitationPreview(null)} onConfirm={(accept) => void confirmInvitation(accept)} />}
           {crashReport?.sharePromptRequired && crashReport.reportId && selectedServer?.id === crashReport.serverId && (
             <CrashShareModal server={selectedServer} onDecision={(share, remember) => void respondToCrashSharing(share, remember)} />

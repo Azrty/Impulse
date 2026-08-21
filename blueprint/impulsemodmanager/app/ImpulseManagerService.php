@@ -288,7 +288,8 @@ class ImpulseManagerService
     public function saveProperties(Server $server, array $properties): void
     {
         $allowed = [
-            'manifest.version', 'public.host', 'manifest.port', 'server.name', 'server.description', 'server.autoConnect',
+            'manifest.version', 'manifest.signing.enabled', 'manifest.signing.privateKey', 'manifest.signing.publicKey',
+            'public.host', 'manifest.port', 'server.name', 'server.description', 'server.autoConnect',
             'minecraft.version', 'minecraft.loader', 'minecraft.port', 'loader.version', 'forge.version',
             'mods.directory', 'optionalmods.directory', 'media.directory', 'mods.exclude', 'menu.enabled', 'menu.skin',
             'menu.title', 'menu.subtitle', 'menu.hideServerNameFromPlayButton', 'singleplayerenabled', 'multiplayerenabled',

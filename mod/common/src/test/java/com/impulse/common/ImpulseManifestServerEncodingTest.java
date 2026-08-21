@@ -10,6 +10,11 @@ import java.net.ServerSocket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Base64;
 import java.util.HashSet;
 import java.util.Properties;
 import java.util.Set;
@@ -104,13 +109,17 @@ public final class ImpulseManifestServerEncodingTest {
 
             ImpulseManifestServer.start(root, new ImpulseRuntimeDefaults("1.21.1", "neoforge", "21.1.243", "localhost", Integer.valueOf(25565), "1.0.5"));
             URL manifestUrl = new URL("http://localhost:" + port + "/impulse/server.json");
-            String manifest = new String(fetch(manifestUrl), StandardCharsets.UTF_8);
+            byte[] signedManifest = fetchSignedManifest(manifestUrl);
+            String manifest = new String(signedManifest, StandardCharsets.UTF_8);
             assertHead(manifestUrl, manifest.getBytes(StandardCharsets.UTF_8).length);
             if (!manifest.contains("\"impulse_version\":\"1.0.5\"")) {
                 throw new AssertionError("Manifest is missing the Impulse runtime version: " + manifest);
             }
             if (!manifest.contains("\"optional_mods\"")) {
                 throw new AssertionError("Manifest is missing optional_mods: " + manifest);
+            }
+            if (!manifest.contains("\"sha512\"")) {
+                throw new AssertionError("Manifest is missing SHA-512 hashes: " + manifest);
             }
             if (!manifest.contains("\"name\":\"Metadata Mod\"") || !manifest.contains("\"description\":\"A real metadata description.\"")) {
                 throw new AssertionError("Manifest did not expose mod metadata: " + manifest);
@@ -219,6 +228,32 @@ public final class ImpulseManifestServerEncodingTest {
         if (status < 200 || status >= 300) {
             throw new AssertionError("HTTP " + status + " for " + url + ": " + new String(body, StandardCharsets.UTF_8));
         }
+        return body;
+    }
+
+    private static byte[] fetchSignedManifest(URL url) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(5000);
+        connection.setReadTimeout(5000);
+        int status = connection.getResponseCode();
+        byte[] body = readFully(connection.getInputStream());
+        if (status != 200) throw new AssertionError("HTTP " + status + " for " + url);
+        String algorithm = connection.getHeaderField("X-Impulse-Signature-Algorithm");
+        String publicKeyValue = connection.getHeaderField("X-Impulse-Public-Key");
+        String signatureValue = connection.getHeaderField("X-Impulse-Signature");
+        if (!"Ed25519".equals(algorithm) || publicKeyValue == null || signatureValue == null) {
+            throw new AssertionError("Manifest response is missing Ed25519 signature headers.");
+        }
+        PublicKey publicKey = KeyFactory.getInstance("Ed25519").generatePublic(
+            new X509EncodedKeySpec(Base64.getUrlDecoder().decode(publicKeyValue))
+        );
+        Signature verifier = Signature.getInstance("Ed25519");
+        verifier.initVerify(publicKey);
+        verifier.update(body);
+        if (!verifier.verify(Base64.getUrlDecoder().decode(signatureValue))) {
+            throw new AssertionError("Manifest Ed25519 signature is invalid.");
+        }
+        connection.disconnect();
         return body;
     }
 

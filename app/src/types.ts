@@ -4,6 +4,7 @@ export interface ImpulseMod {
   description: string;
   file_name: string;
   download_url: string | null;
+  sha512: string | null;
   sha1: string | null;
   sha256?: string | null;
   size: number;
@@ -12,6 +13,10 @@ export interface ImpulseMod {
   category_id?: string | null;
   dependencies: string[];
   conflicts: string[];
+  verification?: {
+    status: 'Matched on Modrinth' | 'Matched on CurseForge' | 'Recognized by Impulse' | 'Pending CurseForge verification' | 'Incompatible Modrinth listing' | 'Incompatible CurseForge listing' | 'Unverified' | 'Verification unavailable';
+    modrinth_status?: string;
+  };
 }
 
 export interface OptionalModCategory {
@@ -65,6 +70,11 @@ export interface ImpulseManifest {
   announcements: ImpulseAnnouncement[];
   changelog: ImpulseChangelog[];
   events: ImpulseEvent[];
+  security?: {
+    signed: boolean;
+    publicKey: string | null;
+    fingerprint: string | null;
+  };
 }
 
 export interface ImpulseAnnouncement {
@@ -96,6 +106,8 @@ export interface SavedServer {
   host: string;
   port: number;
   manifestPort: number;
+  manifestPublicKey?: string | null;
+  manifestUnsignedAllowed?: boolean;
   status: ServerStatus;
   manifest: ImpulseManifest;
   optionalModSelections?: Record<string, boolean>;
@@ -107,6 +119,7 @@ export interface SavedServer {
   optionalModPromptedSignature?: string | null;
   crashReportSharing?: 'ask' | 'always' | 'never';
   outdatedImpulseWarningDismissed?: boolean;
+  acceptedUnverifiedModSignature?: string | null;
   addedAt: string;
   updatedAt: string;
   profileId: string;
@@ -161,6 +174,7 @@ export interface ImpulseInvitation {
   manifestPort: number;
   action: 'add' | 'launch';
   optional: string[];
+  manifestKey?: string | null;
   error?: string;
 }
 

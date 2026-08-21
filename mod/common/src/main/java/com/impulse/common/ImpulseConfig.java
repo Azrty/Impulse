@@ -15,6 +15,9 @@ public final class ImpulseConfig {
     public final int manifestPort;
     public final int manifestHttpThreads;
     public final int manifestHttpBacklog;
+    public final boolean manifestSigningEnabled;
+    public final File manifestSigningPrivateKey;
+    public final File manifestSigningPublicKey;
     public final String publicHost;
     public final String serverName;
     public final String description;
@@ -59,6 +62,9 @@ public final class ImpulseConfig {
         this.manifestPort = parseInt(props.getProperty("manifest.port"), 25850);
         this.manifestHttpThreads = clamp(parseInt(props.getProperty("manifest.httpThreads"), 64), 1, 256);
         this.manifestHttpBacklog = clamp(parseInt(props.getProperty("manifest.httpBacklog"), 256), 1, 4096);
+        this.manifestSigningEnabled = Boolean.parseBoolean(props.getProperty("manifest.signing.enabled", "true"));
+        this.manifestSigningPrivateKey = resolve(serverRoot, props.getProperty("manifest.signing.privateKey", "impulse/keys/manifest-ed25519-private.pk8"), "impulse/keys/manifest-ed25519-private.pk8");
+        this.manifestSigningPublicKey = resolve(serverRoot, props.getProperty("manifest.signing.publicKey", "impulse/keys/manifest-ed25519-public.der"), "impulse/keys/manifest-ed25519-public.der");
         this.publicHost = props.getProperty("public.host", "localhost").trim();
         this.serverName = configuredServerName(props.getProperty("server.name", ""), serverProperties);
         this.description = props.getProperty("server.description", "A Forge server published through Impulse.").trim();
@@ -181,6 +187,9 @@ public final class ImpulseConfig {
         props.setProperty("manifest.port", "25850");
         props.setProperty("manifest.httpThreads", "64");
         props.setProperty("manifest.httpBacklog", "256");
+        props.setProperty("manifest.signing.enabled", "true");
+        props.setProperty("manifest.signing.privateKey", "impulse/keys/manifest-ed25519-private.pk8");
+        props.setProperty("manifest.signing.publicKey", "impulse/keys/manifest-ed25519-public.der");
         props.setProperty("manifest.version", "1");
         props.setProperty("updater.enabled", "true");
         props.setProperty("updater.channel", "stable");

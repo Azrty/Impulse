@@ -17,18 +17,19 @@ declare global {
       removeMinecraftAccount: (accountId: string) => Promise<{ success: boolean; error?: string; accounts?: MinecraftAccount[] }>;
 
       listServers: () => Promise<SavedServer[]>;
-      addServer: (payload: { address: string; manifestPort?: number }) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
+      addServer: (payload: { address: string; manifestPort?: number; manifestKey?: string | null }) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
       previewInvitation: (raw: string) => Promise<{ success: boolean; error?: string; invitation?: ImpulseInvitation; server?: SavedServer }>;
       consumeDeepLinks: () => Promise<ImpulseInvitation[]>;
       refreshServer: (serverId: string) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[]; details?: OfflineDetails }>;
       updateOptionalMods: (serverId: string, selections: Record<string, boolean>, markPrompted?: boolean) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
       dismissOutdatedVersionWarning: (serverId: string) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
+      acceptUnverifiedMods: (serverId: string, signature: string) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
       respondCrashSharing: (reportId: string, share: boolean, remember?: boolean) => Promise<{ success: boolean; error?: string; shared?: boolean; servers?: SavedServer[] }>;
       updateCrashSharing: (serverId: string, preference: 'ask' | 'always' | 'never') => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
       retryCrashReports: (serverId?: string | null) => Promise<{ success: boolean; error?: string }>;
       markAnnouncementsRead: (serverId: string, ids: string[]) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
       removeServer: (serverId: string) => Promise<{ success: boolean; servers?: SavedServer[] }>;
-      launchServer: (serverId: string) => Promise<{ success: boolean; error?: string; details?: OfflineDetails }>;
+      launchServer: (serverId: string) => Promise<{ success: boolean; error?: string; details?: OfflineDetails; verificationRequired?: boolean; server?: SavedServer }>;
       cancelLaunch: (serverId: string) => Promise<{ success: boolean; error?: string }>;
       verifyServerFiles: (serverId: string) => Promise<{ success: boolean; error?: string; details?: OfflineDetails; report?: RepairReport | null; server?: SavedServer }>;
 

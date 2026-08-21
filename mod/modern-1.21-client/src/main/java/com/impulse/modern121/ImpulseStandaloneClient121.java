@@ -426,12 +426,32 @@ public final class ImpulseStandaloneClient121 {
         }
 
         private void saveAndQuit() {
-            try {
-                ImpulseStandaloneBootstrap.saveProfile(gameDirectory(), this.discovery, new ArrayList<String>(this.selected));
-                this.minecraft.stop();
-            } catch (Exception error) {
-                this.status = error.getMessage();
-            }
+            if (this.checking) return;
+            this.checking = true;
+            this.status = "Downloading and verifying server mods...";
+            rebuildWidgets();
+            final List<String> selections = new ArrayList<String>(this.selected);
+            Thread worker = new Thread(() -> {
+                try {
+                    ImpulseStandaloneBootstrap.Profile saved = ImpulseStandaloneBootstrap.prepareProfileForLaunch(gameDirectory(), this.discovery, selections);
+                    List<ImpulseStandaloneBootstrap.ManifestMod> problems = ImpulseStandaloneBootstrap.problematicMods(this.discovery.manifest, selections);
+                    String signature = ImpulseStandaloneBootstrap.problematicSignature(problems);
+                    this.minecraft.execute(() -> {
+                        this.checking = false;
+                        if (!problems.isEmpty() && !signature.equals(saved.accepted_unverified_mod_signature)) {
+                            this.minecraft.setScreen(new ModVerificationWarningScreen(this, saved, problems, signature));
+                        } else this.minecraft.stop();
+                    });
+                } catch (Exception error) {
+                    this.minecraft.execute(() -> {
+                        this.status = error.getMessage() == null ? "Could not prepare this server." : error.getMessage();
+                        this.checking = false;
+                        rebuildWidgets();
+                    });
+                }
+            }, "impulse-standalone-prepare");
+            worker.setDaemon(true);
+            worker.start();
         }
 
         public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
@@ -459,6 +479,64 @@ public final class ImpulseStandaloneClient121 {
 
         public void onClose() {
             this.minecraft.setScreen(this.parent);
+        }
+    }
+
+    private static final class ModVerificationWarningScreen extends Screen {
+        private final Screen parent;
+        private final ImpulseStandaloneBootstrap.Profile profile;
+        private final List<ImpulseStandaloneBootstrap.ManifestMod> mods;
+        private final String signature;
+        private final long readyAt = System.currentTimeMillis() + 5000L;
+        private Button continueButton;
+
+        private ModVerificationWarningScreen(Screen parent, ImpulseStandaloneBootstrap.Profile profile, List<ImpulseStandaloneBootstrap.ManifestMod> mods, String signature) {
+            super(Component.literal("Some server mods could not be independently verified"));
+            this.parent = parent; this.profile = profile; this.mods = mods; this.signature = signature;
+        }
+
+        protected void init() {
+            int width = Math.min(420, this.width - 32);
+            this.addRenderableWidget(Button.builder(Component.literal("Copy SHA-512 list"), button -> {
+                StringBuilder value = new StringBuilder();
+                for (ImpulseStandaloneBootstrap.ManifestMod mod : mods) value.append(mod.name).append(" | ").append(mod.file_name).append(" | ").append(mod.sha512).append('\n');
+                this.minecraft.keyboardHandler.setClipboard(value.toString());
+            }).bounds(this.width / 2 - 70, this.height - 62, 140, 20).build());
+            this.addRenderableWidget(Button.builder(Component.literal("Cancel"), button -> this.minecraft.setScreen(this.parent)).bounds(this.width / 2 - 134, this.height - 36, 128, 20).build());
+            this.continueButton = this.addRenderableWidget(Button.builder(Component.literal("Continue anyway (5)"), button -> {
+                try { ImpulseStandaloneBootstrap.acceptUnverifiedMods(gameDirectory(), profile.id, signature); this.minecraft.stop(); }
+                catch (Exception error) { this.minecraft.setScreen(this.parent); }
+            }).bounds(this.width / 2 + 6, this.height - 36, 128, 20).build());
+            this.continueButton.active = false;
+        }
+
+        public void tick() {
+            int seconds = Math.max(0, (int) Math.ceil((readyAt - System.currentTimeMillis()) / 1000.0));
+            this.continueButton.active = seconds == 0;
+            this.continueButton.setMessage(Component.literal(seconds > 0 ? "Continue anyway (" + seconds + ")" : "Continue anyway"));
+        }
+
+        public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+            graphics.fill(0, 0, this.width, this.height, 0xFF0B0B0B);
+            int panelWidth = Math.min(540, this.width - 24);
+            graphics.drawCenteredString(this.font, this.title, this.width / 2, 18, 0xFFFFFF);
+            String body = "Impulse confirmed that these files match the SHA-512 hashes declared by the server, but some could not be matched to a compatible Modrinth or CurseForge release, or the Impulse recognized-mod registry. Minecraft mods can run code on your computer. Continue only if you trust this server or have reviewed these files yourself.";
+            List<FormattedCharSequence> lines = this.font.split(Component.literal(body), panelWidth);
+            int y = 40;
+            for (FormattedCharSequence line : lines) { graphics.drawCenteredString(this.font, line, this.width / 2, y, 0xBBBBBB); y += 10; }
+            y += 8;
+            for (int i = 0; i < Math.min(mods.size(), Math.max(1, (this.height - y - 52) / 48)); i++) {
+                ImpulseStandaloneBootstrap.ManifestMod mod = mods.get(i);
+                graphics.drawString(this.font, fit(mod.name, panelWidth), this.width / 2 - panelWidth / 2, y, 0xFFFFFF, false);
+                graphics.drawString(this.font, fit((mod.verification == null ? "Verification unavailable" : mod.verification.status) + " | " + mod.file_name, panelWidth), this.width / 2 - panelWidth / 2, y + 11, 0xD8A95D, false);
+                String hash = mod.sha512 == null ? "" : mod.sha512;
+                String firstHalf = hash.substring(0, Math.min(64, hash.length()));
+                String secondHalf = hash.length() > 64 ? hash.substring(64) : "";
+                graphics.drawString(this.font, fit("SHA-512 " + firstHalf, panelWidth), this.width / 2 - panelWidth / 2, y + 22, 0x888888, false);
+                if (!secondHalf.isEmpty()) graphics.drawString(this.font, fit(secondHalf, panelWidth), this.width / 2 - panelWidth / 2, y + 33, 0x888888, false);
+                y += 48;
+            }
+            super.render(graphics, mouseX, mouseY, partialTick);
         }
     }
 

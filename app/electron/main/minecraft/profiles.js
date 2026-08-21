@@ -280,13 +280,14 @@ class ProfileManager {
 
     const normalizeFileList = (items = []) => items
       .map((item) => ({
+        sha512: String(item.sha512 || '').toLowerCase(),
         sha1: String(item.sha1 || '').toLowerCase(),
         file_name: item.file_name || item.name || '',
         download_url: item.download_url || '',
         size: Number(item.size || 0),
         required: item.required !== false,
       }))
-      .sort((a, b) => `${a.sha1}:${a.file_name}`.localeCompare(`${b.sha1}:${b.file_name}`));
+      .sort((a, b) => `${a.sha512 || a.sha1}:${a.file_name}`.localeCompare(`${b.sha512 || b.sha1}:${b.file_name}`));
     const sameFileList = (left = [], right = []) => {
       const a = normalizeFileList(left);
       const b = normalizeFileList(right);
@@ -357,8 +358,8 @@ class ProfileManager {
         required: m.required !== undefined ? !!m.required : true,
       }));
       
-      const addedMods = serverMods.filter(sm => !profile.mods.find(pm => pm.sha1 === sm.sha1));
-      const removedMods = profile.mods.filter(pm => !serverMods.find(sm => sm.sha1 === pm.sha1) && (!keepUserMods || pm.required));
+      const addedMods = serverMods.filter(sm => !profile.mods.find(pm => (pm.sha512 || pm.sha1) === (sm.sha512 || sm.sha1)));
+      const removedMods = profile.mods.filter(pm => !serverMods.find(sm => (sm.sha512 || sm.sha1) === (pm.sha512 || pm.sha1)) && (!keepUserMods || pm.required));
       
       if (addedMods.length) changes.push(`+${addedMods.length} mod(s) added`);
       if (removedMods.length) changes.push(`-${removedMods.length} mod(s) removed`);

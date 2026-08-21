@@ -54,7 +54,10 @@ const INTERNET_OFFLINE_CARD = {
 };
 const UPDATE_FEED_URL = 'https://impulse.epivalent.com';
 const IMPULSE_MOD_INDEX_URL = 'https://impulse.epivalent.com/mods/index.json';
-const LEGAL_DOCUMENT_VERSION = '2026-08-15.3';
+const IMPULSE_RECOGNIZED_MODS_URL = 'https://api.impulsemc.com/v1/mod-verification/recognized-mods';
+const IMPULSE_CURSEFORGE_VERIFICATION_URL = 'https://api.impulsemc.com/v1/mod-verification/curseforge';
+const MODRINTH_VERSION_FILES_URL = 'https://api.modrinth.com/v2/version_files';
+const LEGAL_DOCUMENT_VERSION = '2026-08-20.2';
 const PRIVACY_POLICY_URL = 'https://impulsemc.com/privacy/';
 const TERMS_OF_SERVICE_URL = 'https://impulsemc.com/terms/';
 const CRASH_REPORT_UPLOAD_LIMIT = 2 * 1024 * 1024;
@@ -68,6 +71,8 @@ let discordCrashTimer = null;
 let updaterDownloadPromise = null;
 let consentDependentServicesStarted = false;
 let officialImpulseReleasesCache = { expiresAt: 0, releases: [] };
+const modVerificationCache = new Map();
+let recognizedModsCache = { expiresAt: 0, mods: null };
 
 function normalizeUpdateChannel(value) {
   return value === 'beta' ? 'beta' : 'stable';
@@ -917,7 +922,54 @@ function parseImpulseDeepLink(raw) {
   const manifestPort = Math.max(1, Math.min(65535, Number(url.searchParams.get('manifest_port')) || 25850));
   const action = url.searchParams.get('action') === 'launch' ? 'launch' : 'add';
   const optional = [...new Set(String(url.searchParams.get('optional') || '').split(',').map((id) => id.trim().toLowerCase()).filter(Boolean))];
-  return { raw: url.toString(), address, manifestPort, action, optional };
+  const manifestKey = normalizeManifestPublicKey(url.searchParams.get('manifest_key'));
+  return { raw: url.toString(), address, manifestPort, action, optional, manifestKey };
+}
+
+function normalizeManifestPublicKey(value) {
+  const clean = String(value || '').trim().replace(/=+$/, '');
+  if (!clean) return null;
+  if (!/^[A-Za-z0-9_-]{40,256}$/.test(clean)) throw new Error('The invitation contains an invalid manifest signing key.');
+  try {
+    const key = crypto.createPublicKey({ key: Buffer.from(clean, 'base64url'), format: 'der', type: 'spki' });
+    if (key.asymmetricKeyType !== 'ed25519') throw new Error('not Ed25519');
+  } catch {
+    throw new Error('The invitation contains an invalid Ed25519 manifest signing key.');
+  }
+  return clean;
+}
+
+function manifestKeyFingerprint(publicKey) {
+  return crypto.createHash('sha256').update(Buffer.from(publicKey, 'base64url')).digest('hex');
+}
+
+function verifyManifestEnvelope(body, headers, expectedPublicKey = null) {
+  const algorithm = String(headers.get('x-impulse-signature-algorithm') || '').trim();
+  const publicKey = normalizeManifestPublicKey(headers.get('x-impulse-public-key'));
+  const signatureValue = String(headers.get('x-impulse-signature') || '').trim();
+  const declaredFingerprint = String(headers.get('x-impulse-key-id') || '').trim().toLowerCase();
+  const hasSigningHeaders = !!(algorithm || publicKey || signatureValue || declaredFingerprint);
+  if (!hasSigningHeaders) {
+    if (expectedPublicKey) throw new Error('Manifest security check failed: this server stopped signing its manifest.');
+    return { signed: false, publicKey: null, fingerprint: null };
+  }
+  if (algorithm.toLowerCase() !== 'ed25519' || !publicKey || !signatureValue) {
+    throw new Error('Manifest security check failed: incomplete Ed25519 signature headers.');
+  }
+  const fingerprint = manifestKeyFingerprint(publicKey);
+  if (declaredFingerprint && declaredFingerprint !== fingerprint) {
+    throw new Error('Manifest security check failed: the signing key fingerprint is invalid.');
+  }
+  if (expectedPublicKey && expectedPublicKey !== publicKey) {
+    throw new Error(`Manifest signing key changed. Expected ${manifestKeyFingerprint(expectedPublicKey)}, received ${fingerprint}.`);
+  }
+  let valid = false;
+  try {
+    const key = crypto.createPublicKey({ key: Buffer.from(publicKey, 'base64url'), format: 'der', type: 'spki' });
+    valid = crypto.verify(null, body, key, Buffer.from(signatureValue, 'base64url'));
+  } catch {}
+  if (!valid) throw new Error('Manifest security check failed: invalid Ed25519 signature.');
+  return { signed: true, publicKey, fingerprint };
 }
 
 function deliverDeepLink(raw) {
@@ -1190,8 +1242,8 @@ async function latestOfficialImpulseMod(minecraft, timeoutMs) {
   if (!release) {
     throw new Error(`No official Impulse mod is available for Minecraft ${minecraft.version} ${minecraft.loader}.`);
   }
-  const sha1 = String(release.sha1 || '').trim().toLowerCase();
-  if (!/^[0-9a-f]{40}$/.test(sha1)) throw new Error(`Official Impulse ${release.version} is missing its SHA1 checksum.`);
+  const sha512 = String(release.sha512 || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{128}$/.test(sha512)) throw new Error(`Official Impulse ${release.version} is missing its SHA-512 checksum.`);
   let downloadUrl;
   try {
     const parsed = new URL(String(release.download_url || ''));
@@ -1206,7 +1258,8 @@ async function latestOfficialImpulseMod(minecraft, timeoutMs) {
     description: `Official Impulse client mod ${release.version}.`,
     file_name: safeManifestFileName(release.file_name || `impulse-${minecraft.loader}-${minecraft.version}-${release.version}.jar`),
     download_url: downloadUrl,
-    sha1,
+    sha512,
+    sha1: String(release.sha1 || '').trim().toLowerCase() || null,
     sha256: String(release.sha256 || '').trim().toLowerCase() || null,
     size: Number(release.size || 0),
     required: true,
@@ -1228,13 +1281,14 @@ async function useLatestOfficialImpulseMod(manifest, timeoutMs) {
 
 function normalizeManifestMod(mod, host, manifestPort, fallbackPath, requiredFallback) {
   const fileName = safeManifestFileName(mod.file_name || mod.name || 'mod.jar');
-  const stableId = String(mod.id || mod.mod_id || mod.sha1 || fileName).trim().toLowerCase();
+  const stableId = String(mod.id || mod.mod_id || mod.sha512 || mod.sha1 || fileName).trim().toLowerCase();
   return {
     id: stableId,
     name: String(mod.name || fileName || 'mod'),
     description: String(mod.description || ''),
     file_name: fileName,
     download_url: absoluteManifestUrl(host, manifestPort, mod.download_url, fallbackPath),
+    sha512: mod.sha512 ? String(mod.sha512).toLowerCase() : null,
     sha1: mod.sha1 ? String(mod.sha1).toLowerCase() : null,
     size: Number(mod.size || 0),
     required: mod.required !== undefined ? mod.required !== false : requiredFallback,
@@ -1297,6 +1351,98 @@ function normalizeContentList(value, kind) {
     }
     return true;
   });
+}
+
+function verificationStatusProblematic(status) {
+  return status !== 'Matched on Modrinth' && status !== 'Matched on CurseForge' && status !== 'Recognized by Impulse';
+}
+
+function finalVerificationProblems(profile, serverEntry) {
+  const manifestMods = new Map(
+    [...(serverEntry.manifest?.mods || []), ...(serverEntry.manifest?.optional_mods || [])]
+      .map((mod) => [String(mod.sha512 || '').toLowerCase(), mod])
+  );
+  return (profile.mods || [])
+    .map((mod) => manifestMods.get(String(mod.sha512 || '').toLowerCase()))
+    .filter((mod) => mod && verificationStatusProblematic(mod.verification?.status));
+}
+
+function finalVerificationSignature(mods) {
+  return mods.map((mod) => `${mod.sha512}:${mod.verification?.status || 'Verification unavailable'}`).sort().join('|');
+}
+
+async function fetchRecognizedMods(timeoutMs) {
+  if (recognizedModsCache.mods && recognizedModsCache.expiresAt > Date.now()) return recognizedModsCache.mods;
+  try {
+    const response = await fetch(IMPULSE_RECOGNIZED_MODS_URL, {
+      signal: AbortSignal.timeout(Math.max(3000, timeoutMs)),
+      headers: { Accept: 'application/json', 'User-Agent': 'ImpulseLauncher/1.2' }
+    });
+    if (!response.ok) throw new Error(`Impulse registry returned HTTP ${response.status}`);
+    const body = await response.json();
+    const mods = body && typeof body.mods === 'object' && !Array.isArray(body.mods) ? body.mods : {};
+    recognizedModsCache = { expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, mods };
+    store.set('recognizedModsCache', recognizedModsCache);
+    return mods;
+  } catch (error) {
+    const saved = store.get('recognizedModsCache');
+    if (saved?.mods && Number(saved.expiresAt) > Date.now()) {
+      recognizedModsCache = saved;
+      return saved.mods;
+    }
+    throw error;
+  }
+}
+
+async function verifyManifestModOrigins(manifest, timeoutMs) {
+  const all = [...(manifest.mods || []), ...(manifest.optional_mods || [])];
+  const hashes = [...new Set(all.map((mod) => String(mod.sha512 || '').toLowerCase()).filter((hash) => /^[0-9a-f]{128}$/.test(hash)))];
+  let recognized = null;
+  let modrinth = null;
+  try { recognized = await fetchRecognizedMods(timeoutMs); } catch (error) { console.warn('[Impulse verification] Registry unavailable:', error.message); }
+  try {
+    const response = await fetch(MODRINTH_VERSION_FILES_URL, {
+      method: 'POST',
+      signal: AbortSignal.timeout(Math.max(3000, timeoutMs)),
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'ImpulseLauncher/1.2 (https://impulsemc.com)' },
+      body: JSON.stringify({ hashes, algorithm: 'sha512' })
+    });
+    if (!response.ok) throw new Error(`Modrinth returned HTTP ${response.status}`);
+    modrinth = await response.json();
+  } catch (error) {
+    console.warn('[Impulse verification] Modrinth unavailable:', error.message);
+  }
+  const savedVerification = store.get('modVerificationCache') || {};
+  for (const mod of all) {
+    const hash = String(mod.sha512 || '').toLowerCase();
+    let status = 'Pending CurseForge verification';
+    let modrinthStatus = 'Verification unavailable';
+    if (mod.source === 'impulse-official') status = 'Recognized by Impulse';
+    else if (recognized && recognized[hash]) status = 'Recognized by Impulse';
+    else if (modrinth) {
+      const version = modrinth[hash];
+      if (!version) modrinthStatus = 'Unverified';
+      else {
+        const games = Array.isArray(version.game_versions) ? version.game_versions.map(String) : [];
+        const loaders = Array.isArray(version.loaders) ? version.loaders.map((value) => String(value).toLowerCase()) : [];
+        modrinthStatus = games.includes(String(manifest.minecraft.version)) && loaders.includes(String(manifest.minecraft.loader).toLowerCase())
+          ? 'Matched on Modrinth'
+          : 'Incompatible Modrinth listing';
+        if (modrinthStatus === 'Matched on Modrinth') status = modrinthStatus;
+      }
+    }
+    const cached = savedVerification[hash];
+    if (status === 'Pending CurseForge verification' && cached && Number(cached.expiresAt) > Date.now()
+      && ['Matched on Modrinth', 'Recognized by Impulse'].includes(cached.status)) status = cached.status;
+    mod.verification = { status, modrinth_status: modrinthStatus };
+    if (status !== 'Pending CurseForge verification') {
+      const entry = { status, expiresAt: Date.now() + (verificationStatusProblematic(status) ? 24 : 30 * 24) * 60 * 60 * 1000 };
+      modVerificationCache.set(hash, entry);
+      if (hash) savedVerification[hash] = entry;
+    }
+  }
+  store.set('modVerificationCache', savedVerification);
+  return manifest;
 }
 
 function isWildcardHost(value) {
@@ -1374,7 +1520,7 @@ function normalizeManifest(manifest, host, port, manifestPort) {
   };
 }
 
-async function fetchManifest(host, port, manifestPort, timeoutMs = getNetworkTimeout()) {
+async function fetchManifest(host, port, manifestPort, timeoutMs = getNetworkTimeout(), expectedPublicKey = null) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const url = `http://${host}:${manifestPort}/impulse/server.json`;
@@ -1384,8 +1530,14 @@ async function fetchManifest(host, port, manifestPort, timeoutMs = getNetworkTim
       headers: { Accept: 'application/json', 'User-Agent': 'ImpulseLauncher/0.1' }
     });
     if (!response.ok) throw new Error(`Manifest returned HTTP ${response.status}`);
-    const manifest = normalizeManifest(await response.json(), host, port, manifestPort);
-    return await useLatestOfficialImpulseMod(manifest, timeoutMs);
+    const body = Buffer.from(await response.arrayBuffer());
+    const security = verifyManifestEnvelope(body, response.headers, expectedPublicKey);
+    let parsed;
+    try { parsed = JSON.parse(body.toString('utf8')); }
+    catch (error) { throw new Error(`The server returned an invalid manifest: ${error.message}`); }
+    const manifest = normalizeManifest(parsed, host, port, manifestPort);
+    manifest.security = security;
+    return await verifyManifestModOrigins(await useLatestOfficialImpulseMod(manifest, timeoutMs), timeoutMs);
   } catch (error) {
     if (error?.name === 'AbortError' || /aborted/i.test(error?.message || '')) {
       throw new Error(`Manifest request timed out after ${Math.round(timeoutMs / 1000)}s: ${url}`);
@@ -1409,6 +1561,8 @@ function normalizeSavedServer(server) {
     manifestPort,
     profileId: server?.profileId || `impulse-${id}`,
     crashReportSharing: normalizeCrashSharingPreference(server?.crashReportSharing),
+    manifestPublicKey: server?.manifestPublicKey || server?.manifest?.security?.publicKey || null,
+    manifestUnsignedAllowed: server?.manifestUnsignedAllowed === true,
     outdatedImpulseWarningDismissed: server?.outdatedImpulseWarningDismissed === true,
     status: server?.status || { online: false, error: SERVER_OFFLINE_MESSAGE },
     manifest: server?.manifest || { mods: [], optional_mods: [], optional_mod_categories: [] }
@@ -1508,7 +1662,7 @@ async function assertServerOnline(server, event = null, progress = 4) {
 }
 
 function optionalModKey(mod) {
-  return String(mod?.sha1 || mod?.file_name || mod?.name || '').toLowerCase();
+  return String(mod?.sha512 || mod?.sha1 || mod?.file_name || mod?.name || '').toLowerCase();
 }
 
 function optionalModSignature(manifest) {
@@ -1792,7 +1946,7 @@ async function refreshActiveMicrosoftAccountIfNeeded() {
   return store.get('authData');
 }
 
-async function discoverServer(input, manifestPort = null, event = null) {
+async function discoverServer(input, manifestPort = null, event = null, expectedPublicKey = null) {
   const parsed = parseServerAddress(input);
   const port = Number(parsed.port || 25565);
   const knownManifestPort = validPort(manifestPort);
@@ -1811,7 +1965,7 @@ async function discoverServer(input, manifestPort = null, event = null) {
     || 25850;
   let manifest;
   try {
-    manifest = await fetchManifest(parsed.host, port, resolvedManifestPort);
+    manifest = await fetchManifest(parsed.host, port, resolvedManifestPort, getNetworkTimeout(), expectedPublicKey);
   } catch (error) {
     const recheck = await pingMinecraftServer(parsed.host, port);
     if (!recheck.online) {
@@ -1833,6 +1987,8 @@ async function discoverServer(input, manifestPort = null, event = null) {
     manifestPort: resolvedManifestPort,
     status,
     manifest,
+    manifestPublicKey: manifest.security?.publicKey || expectedPublicKey || null,
+    manifestUnsignedAllowed: manifest.security?.signed !== true,
     addedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     profileId: `impulse-${id}`
@@ -1850,7 +2006,7 @@ async function refreshSavedServer(existing, options = {}) {
 
   let manifest;
   try {
-    manifest = await fetchManifest(existing.host, existing.port, existing.manifestPort, options.timeout || 10000);
+    manifest = await fetchManifest(existing.host, existing.port, existing.manifestPort, options.timeout || 10000, existing.manifestPublicKey || null);
   } catch (error) {
     const recheck = await pingMinecraftServer(existing.host, existing.port);
     if (!recheck.online) {
@@ -1866,6 +2022,7 @@ async function refreshSavedServer(existing, options = {}) {
     ...existing,
     status,
     manifest,
+    manifestPublicKey: manifest.security?.publicKey || existing.manifestPublicKey || null,
     updatedAt: new Date().toISOString()
   };
 }
@@ -2028,13 +2185,22 @@ async function downloadProfileMods(event, minecraftPath, profile, serverEntry) {
     const mod = mods[i];
     const label = safeManifestFileName(mod.file_name || mod.name || 'mod.jar');
     const ext = path.extname(label) || '.jar';
-    if (!mod.sha1) throw new Error(`The mod "${label}" is missing sha1.`);
+    if (!/^[0-9a-f]{128}$/.test(String(mod.sha512 || ''))) {
+      throw new Error('This server uses an outdated mod manifest that does not provide SHA-512 hashes. Ask the server owner to update Impulse.');
+    }
     if (!mod.download_url) throw new Error(`The mod "${label}" is missing download_url.`);
 
-    const cached = await cacheManager.hasFile('mods', mod.sha1, ext);
+    let cached = await cacheManager.hasFile('mods', mod.sha512, ext);
+    if (!cached && /^[0-9a-f]{40}$/.test(String(mod.sha1 || '')) && await cacheManager.hasFile('mods', mod.sha1, ext)) {
+      const legacyPath = cacheManager.getCachePath('mods', mod.sha1, ext);
+      if (await cacheManager.verifyFileSha512(legacyPath, mod.sha512).catch(() => false)) {
+        await fs.copyFile(legacyPath, cacheManager.getCachePath('mods', mod.sha512, ext));
+        cached = true;
+      }
+    }
     if (cached) {
-      const cachePath = cacheManager.getCachePath('mods', mod.sha1, ext);
-      const valid = await cacheManager.verifyFileSha1(cachePath, mod.sha1).catch(() => false);
+      const cachePath = cacheManager.getCachePath('mods', mod.sha512, ext);
+      const valid = await cacheManager.verifyFileSha512(cachePath, mod.sha512).catch(() => false);
       if (valid) continue;
       await fs.rm(cachePath, { force: true });
     }
@@ -2082,7 +2248,8 @@ async function downloadProfileMods(event, minecraftPath, profile, serverEntry) {
       sendDownloadProgress(current.label);
       let failed = false;
       try {
-        await cacheManager.downloadAndStore('mods', current.mod.download_url, current.mod.sha1, current.ext, {
+        await cacheManager.downloadAndStore('mods', current.mod.download_url, current.mod.sha512, current.ext, {
+          algorithm: 'sha512',
           timeout,
           attempts: 3,
           signal: activeLaunch?.controller.signal,
@@ -2125,6 +2292,7 @@ async function downloadProfileMods(event, minecraftPath, profile, serverEntry) {
   const profileDir = profileManager.getProfileDir(profileId);
   const items = mods.map((mod) => ({
     category: 'mods',
+    sha512: mod.sha512,
     sha1: mod.sha1,
     ext: path.extname(safeManifestFileName(mod.file_name || mod.name || 'mod.jar')) || '.jar',
     file_name: safeManifestFileName(mod.file_name || mod.name || 'mod.jar')
@@ -2141,11 +2309,11 @@ async function downloadProfileMods(event, minecraftPath, profile, serverEntry) {
   for (const mod of mods) {
     const fileName = safeManifestFileName(mod.file_name || mod.name || 'mod.jar');
     const profileModPath = path.join(profileDir, 'mods', fileName);
-    const actual = await cacheManager.computeFileSha1(profileModPath).catch((error) => {
+    const actual = await cacheManager.computeFileSha512(profileModPath).catch((error) => {
       throw new Error(`Downloaded mod is missing from profile: ${fileName} (${error.message})`);
     });
-    if (actual.toLowerCase() !== String(mod.sha1).toLowerCase()) {
-      throw new Error(`Profile mod SHA1 mismatch for ${fileName}: expected ${mod.sha1}, got ${actual}`);
+    if (actual.toLowerCase() !== String(mod.sha512).toLowerCase()) {
+      throw new Error(`Profile mod SHA-512 mismatch for ${fileName}: expected ${mod.sha512}, got ${actual}`);
     }
   }
 
@@ -2155,6 +2323,109 @@ async function downloadProfileMods(event, minecraftPath, profile, serverEntry) {
     progress: 86,
     total: 100
   });
+}
+
+function curseForgeMurmur2(buffer) {
+  const normalized = Buffer.allocUnsafe(buffer.length);
+  let length = 0;
+  for (const value of buffer) {
+    if (value === 0x09 || value === 0x0a || value === 0x0d || value === 0x20) continue;
+    normalized[length++] = value;
+  }
+  const bytes = normalized.subarray(0, length);
+  const multiplier = 0x5bd1e995;
+  let hash = (1 ^ length) >>> 0;
+  let offset = 0;
+  while (length - offset >= 4) {
+    let chunk = bytes.readUInt32LE(offset);
+    chunk = Math.imul(chunk, multiplier) >>> 0;
+    chunk ^= chunk >>> 24;
+    chunk = Math.imul(chunk, multiplier) >>> 0;
+    hash = (Math.imul(hash, multiplier) ^ chunk) >>> 0;
+    offset += 4;
+  }
+  switch (length - offset) {
+    case 3: hash ^= bytes[offset + 2] << 16;
+    case 2: hash ^= bytes[offset + 1] << 8;
+    case 1: hash ^= bytes[offset]; hash = Math.imul(hash, multiplier) >>> 0;
+  }
+  hash ^= hash >>> 13;
+  hash = Math.imul(hash, multiplier) >>> 0;
+  hash ^= hash >>> 15;
+  return hash >>> 0;
+}
+
+async function curseForgeFingerprint(filePath, sha512) {
+  const key = String(sha512 || '').toLowerCase();
+  const saved = store.get('curseForgeFingerprintCache') || {};
+  const cached = Number(saved[key]);
+  if (Number.isSafeInteger(cached) && cached >= 0 && cached <= 0xffffffff) return cached;
+  const fingerprint = curseForgeMurmur2(await fs.readFile(filePath));
+  saved[key] = fingerprint;
+  const keys = Object.keys(saved);
+  if (keys.length > 5000) for (const stale of keys.slice(0, keys.length - 5000)) delete saved[stale];
+  store.set('curseForgeFingerprintCache', saved);
+  return fingerprint;
+}
+
+async function finalizeManifestModVerification(minecraftPath, profile, serverEntry) {
+  const profileDir = new ProfileManager(minecraftPath).getProfileDir(serverEntry.profileId);
+  const activeMods = profile.mods || [];
+  const byHash = new Map();
+  for (const mod of [...(serverEntry.manifest.mods || []), ...(serverEntry.manifest.optional_mods || [])]) {
+    if (mod.sha512) byHash.set(String(mod.sha512).toLowerCase(), mod);
+  }
+  const unresolved = [];
+  for (const profileMod of activeMods) {
+    const hash = String(profileMod.sha512 || '').toLowerCase();
+    const mod = byHash.get(hash);
+    if (!mod || ['Matched on Modrinth', 'Matched on CurseForge', 'Recognized by Impulse'].includes(mod.verification?.status)) continue;
+    const fileName = safeManifestFileName(profileMod.file_name || profileMod.name || 'mod.jar');
+    const filePath = path.join(profileDir, 'mods', fileName);
+    unresolved.push({ mod, sha512: hash, fingerprint: await curseForgeFingerprint(filePath, hash) });
+  }
+  if (!unresolved.length) return serverEntry;
+
+  let available = true;
+  const results = {};
+  try {
+    for (let offset = 0; offset < unresolved.length; offset += 100) {
+      const chunk = unresolved.slice(offset, offset + 100);
+      const response = await fetch(IMPULSE_CURSEFORGE_VERIFICATION_URL, {
+        method: 'POST',
+        signal: AbortSignal.timeout(Math.max(5000, getNetworkTimeout())),
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'ImpulseLauncher/1.2 (https://impulsemc.com)' },
+        body: JSON.stringify({
+          minecraft_version: serverEntry.manifest.minecraft.version,
+          loader: serverEntry.manifest.minecraft.loader,
+          files: chunk.map(({ sha512, fingerprint }) => ({ sha512, fingerprint }))
+        })
+      });
+      if (!response.ok) throw new Error(`Impulse CurseForge verification returned HTTP ${response.status}`);
+      const body = await response.json();
+      Object.assign(results, body?.matches || {});
+    }
+  } catch (error) {
+    available = false;
+    console.warn('[Impulse verification] CurseForge unavailable:', error.message);
+  }
+
+  for (const { mod, sha512 } of unresolved) {
+    const modrinthStatus = mod.verification?.modrinth_status || 'Verification unavailable';
+    const curseForgeStatus = results[sha512]?.status;
+    let status;
+    if (curseForgeStatus === 'Matched on CurseForge') status = curseForgeStatus;
+    else if (modrinthStatus === 'Incompatible Modrinth listing') status = modrinthStatus;
+    else if (curseForgeStatus === 'Incompatible CurseForge listing') status = curseForgeStatus;
+    else if (available) status = 'Unverified';
+    else status = 'Verification unavailable';
+    mod.verification = {
+      ...mod.verification,
+      status,
+      ...(results[sha512] ? { curseforge: results[sha512] } : {})
+    };
+  }
+  return serverEntry;
 }
 
 function minecraftOsName() {
@@ -2296,7 +2567,7 @@ async function verifyLaunchReadiness(event, minecraftPath, profile, serverEntry,
 
   const expectedMods = (profile.mods || []).map((mod) => ({
     fileName: safeManifestFileName(mod.file_name || mod.name || 'mod.jar'),
-    sha1: String(mod.sha1 || '').toLowerCase()
+    sha512: String(mod.sha512 || '').toLowerCase()
   }));
   const expectedNames = new Set(expectedMods.map((mod) => mod.fileName));
 
@@ -2318,12 +2589,12 @@ async function verifyLaunchReadiness(event, minecraftPath, profile, serverEntry,
     } catch {
       throw new Error(`Launch check failed: missing mod ${mod.fileName}`);
     }
-    if (!mod.sha1) throw new Error(`Launch check failed: missing SHA1 for ${mod.fileName}`);
-    const actualSha1 = await cacheManager.computeFileSha1(modPath).catch((error) => {
+    if (!/^[0-9a-f]{128}$/.test(mod.sha512)) throw new Error('This server uses an outdated mod manifest that does not provide SHA-512 hashes. Ask the server owner to update Impulse.');
+    const actualSha512 = await cacheManager.computeFileSha512(modPath).catch((error) => {
       throw new Error(`Launch check failed: unable to read ${mod.fileName} (${error.message})`);
     });
-    if (actualSha1.toLowerCase() !== mod.sha1) {
-      throw new Error(`Launch check failed: SHA1 mismatch for ${mod.fileName}`);
+    if (actualSha512.toLowerCase() !== mod.sha512) {
+      throw new Error(`Launch check failed: SHA-512 mismatch for ${mod.fileName}`);
     }
   }
 
@@ -2429,6 +2700,16 @@ async function prepareServerFiles(event, serverId, options = {}) {
     }
   }
   if (!options.skipFinalPing) await assertServerOnline(merged, event, 94);
+  await finalizeManifestModVerification(minecraftPath, profile, merged);
+  merged = saveServerEntry(serverId, merged);
+  const verificationProblems = finalVerificationProblems(profile, merged);
+  const verificationSignature = finalVerificationSignature(verificationProblems);
+  if (options.requireVerificationAcceptance !== false && verificationSignature && verificationSignature !== merged.acceptedUnverifiedModSignature) {
+    const error = new Error('Server mod verification requires confirmation.');
+    error.code = 'MOD_VERIFICATION_REQUIRED';
+    error.server = merged;
+    throw error;
+  }
   return { minecraftPath, merged, profile, launcher, launchVersion, loader, loaderVersion, version, report };
 }
 
@@ -2814,7 +3095,7 @@ ipcMain.handle('impulse-list-servers', async () => getServers());
 
 ipcMain.handle('impulse-add-server', async (_event, payload) => {
   const servers = getServers();
-  let entry = reconcileOptionalMods(await discoverServer(payload.address, payload.manifestPort || null), false);
+  let entry = reconcileOptionalMods(await discoverServer(payload.address, payload.manifestPort || null, null, payload.manifestKey || null), false);
   const existing = servers.find((server) => server.id === entry.id);
   if (existing) entry = reconcileOptionalMods({
     ...entry,
@@ -2832,7 +3113,7 @@ ipcMain.handle('impulse-add-server', async (_event, payload) => {
 ipcMain.handle('impulse-preview-invitation', async (_event, raw) => {
   try {
     const invitation = typeof raw === 'string' ? parseImpulseDeepLink(raw) : parseImpulseDeepLink(raw?.raw);
-    const server = reconcileOptionalMods(await discoverServer(invitation.address, invitation.manifestPort), false);
+    const server = reconcileOptionalMods(await discoverServer(invitation.address, invitation.manifestPort, null, invitation.manifestKey), false);
     const knownIds = new Set((server.manifest.optional_mods || []).map((mod) => mod.id));
     return { success: true, invitation: { ...invitation, optional: invitation.optional.filter((id) => knownIds.has(id)) }, server };
   } catch (error) {
@@ -2898,6 +3179,21 @@ ipcMain.handle('impulse-dismiss-outdated-version-warning', async (_event, server
     return { success: true, server: updated, servers: next };
   } catch (error) {
     return { success: false, error: error.message || 'Unable to save the warning preference.' };
+  }
+});
+
+ipcMain.handle('impulse-accept-unverified-mods', async (_event, serverId, signature) => {
+  try {
+    const servers = getServers();
+    const existing = servers.find((server) => server.id === serverId);
+    if (!existing) return { success: false, error: 'Server not found.' };
+    const cleanSignature = String(signature || '').slice(0, 65536);
+    const updated = { ...existing, acceptedUnverifiedModSignature: cleanSignature };
+    const next = servers.map((server) => server.id === serverId ? updated : server);
+    setServers(next);
+    return { success: true, server: updated, servers: next };
+  } catch (error) {
+    return { success: false, error: error.message || 'Unable to save mod verification choice.' };
   }
 });
 
@@ -2987,6 +3283,9 @@ ipcMain.handle('impulse-launch-server', async (event, serverId) => {
   try {
     return await launchServer(event, serverId);
   } catch (error) {
+    if (error?.code === 'MOD_VERIFICATION_REQUIRED' && error.server) {
+      return { success: false, verificationRequired: true, server: error.server };
+    }
     const details = isServerOfflineError(error) ? (error.offlineDetails || await offlineDetails()) : undefined;
     event.sender.send('impulse-launch-error', { error: error.message, serverId, details });
     return { success: false, error: error.message, details };
@@ -3006,7 +3305,7 @@ ipcMain.handle('impulse-verify-server-files', async (event, serverId) => {
   if (activeLaunch) return { success: false, error: 'Another launch operation is already running.' };
   activeLaunch = { serverId, controller: new AbortController(), startedAt: Date.now() };
   try {
-    const prepared = await prepareServerFiles(event, serverId, { skipFinalPing: false });
+    const prepared = await prepareServerFiles(event, serverId, { skipFinalPing: false, requireVerificationAcceptance: false });
     return { success: true, report: prepared.report, server: prepared.merged };
   } catch (error) {
     const details = isServerOfflineError(error) ? (error.offlineDetails || await offlineDetails()) : undefined;

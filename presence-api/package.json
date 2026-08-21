@@ -10,9 +10,10 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+    ,"mods:recognize": "node scripts/recognize-mod.mjs && npm test"
   },
   "dependencies": {
     "@fastify/rate-limit": "^10.3.0",

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('api', {
   refreshServer: (serverId) => ipcRenderer.invoke('impulse-refresh-server', serverId),
   updateOptionalMods: (serverId, selections, markPrompted = false) => ipcRenderer.invoke('impulse-update-optional-mods', serverId, selections, markPrompted),
   dismissOutdatedVersionWarning: (serverId) => ipcRenderer.invoke('impulse-dismiss-outdated-version-warning', serverId),
+  acceptUnverifiedMods: (serverId, signature) => ipcRenderer.invoke('impulse-accept-unverified-mods', serverId, signature),
   respondCrashSharing: (reportId, share, remember = true) => ipcRenderer.invoke('impulse-respond-crash-sharing', reportId, share, remember),
   updateCrashSharing: (serverId, preference) => ipcRenderer.invoke('impulse-update-crash-sharing', serverId, preference),
   retryCrashReports: (serverId = null) => ipcRenderer.invoke('impulse-retry-crash-reports', serverId),

@@ -1,13 +1,94 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createPresenceServer, minecraftOfflineUuid } from '../src/server.js';
+const registry = JSON.parse(readFileSync(new URL('../data/recognized-mods.json', import.meta.url), 'utf8'));
 
 const SECRET = 'test-secret-that-is-definitely-longer-than-thirty-two-characters';
 const UUID = '39d9ec7970394f039078ad79e84ff976';
 
 test('matches Minecraft offline UUID generation', () => {
   assert.equal(minecraftOfflineUuid('Notch'), 'b50ad385829d3141a2167e7d7539ba7f');
+});
+
+test('keeps CurseForge verification disabled without an Impulse API key', async () => {
+  const app = await createPresenceServer({ secret: SECRET, logger: false });
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/mod-verification/curseforge',
+    payload: {
+      minecraft_version: '1.21.1',
+      loader: 'neoforge',
+      files: [{ sha512: 'a'.repeat(128), fingerprint: 1234567890 }],
+    },
+  });
+  assert.equal(response.statusCode, 503);
+  await app.close();
+});
+
+test('proxies CurseForge fingerprints and validates Minecraft and loader compatibility', async () => {
+  const calls: Array<{ url: string; headers: HeadersInit; body: string }> = [];
+  const app = await createPresenceServer({
+    secret: SECRET,
+    logger: false,
+    curseForgeApiKey: 'impulse-test-key',
+    curseForgeFetch: async (input, init) => {
+      calls.push({ url: String(input), headers: init?.headers ?? {}, body: String(init?.body ?? '') });
+      return new Response(JSON.stringify({
+        data: {
+          exactMatches: [
+            { id: 123, file: { id: 55, modId: 77, fileName: 'good.jar', gameVersions: ['1.21.1', 'NeoForge'] } },
+            { id: 456, file: { id: 56, modId: 78, fileName: 'forge.jar', gameVersions: ['1.21.1', 'Forge'] } },
+          ],
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/mod-verification/curseforge',
+    payload: {
+      minecraft_version: '1.21.1',
+      loader: 'neoforge',
+      files: [
+        { sha512: 'a'.repeat(128), fingerprint: 123 },
+        { sha512: 'b'.repeat(128), fingerprint: 456 },
+        { sha512: 'c'.repeat(128), fingerprint: 789 },
+      ],
+    },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().matches['a'.repeat(128)].status, 'Matched on CurseForge');
+  assert.equal(response.json().matches['b'.repeat(128)].status, 'Incompatible CurseForge listing');
+  assert.equal(response.json().matches['c'.repeat(128)].status, 'Unverified');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://api.curseforge.com/v1/fingerprints/432');
+  assert.equal((calls[0].headers as Record<string, string>)['x-api-key'], 'impulse-test-key');
+  assert.equal((calls[0].headers as Record<string, string>)['User-Agent'], 'PrismLauncher/11.0.3');
+  await app.close();
+});
+
+test('retries transient CurseForge failures', async () => {
+  let calls = 0;
+  const app = await createPresenceServer({
+    secret: SECRET,
+    logger: false,
+    curseForgeApiKey: 'impulse-test-key',
+    curseForgeFetch: async () => {
+      calls++;
+      if (calls < 3) return new Response('{}', { status: 503 });
+      return new Response(JSON.stringify({ data: { exactMatches: [] } }), { status: 200 });
+    },
+  });
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/mod-verification/curseforge',
+    payload: { minecraft_version: '1.21.1', loader: 'neoforge', files: [{ sha512: 'd'.repeat(128), fingerprint: 42 }] },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(calls, 3);
+  await app.close();
 });
 
 test('verifies a challenge and reports ephemeral presence', async () => {
@@ -218,5 +299,16 @@ test('accepts legacy empty form POST requests', async () => {
   });
   assert.equal(response.statusCode, 200);
   assert.equal(typeof response.json().challenge_id, 'string');
+  await app.close();
+});
+
+test('serves the recognized mod registry with an ETag', async () => {
+  const app = await createPresenceServer({ secret: SECRET, logger: false, verifyMojang: async () => null });
+  const response = await app.inject({ method: 'GET', url: '/v1/mod-verification/recognized-mods' });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), registry);
+  assert.match(String(response.headers.etag), /^"[0-9a-f]{64}"$/);
+  const cached = await app.inject({ method: 'GET', url: '/v1/mod-verification/recognized-mods', headers: { 'if-none-match': String(response.headers.etag) } });
+  assert.equal(cached.statusCode, 304);
   await app.close();
 });

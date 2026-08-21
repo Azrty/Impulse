@@ -45,6 +45,9 @@ Important settings:
 - `loader.version` - Forge/NeoForge loader version exposed to the launcher.
 - `forge.version` - legacy Forge version key still supported for older configs.
 - `manifest.port` - HTTP manifest server port, default `25850`.
+- `manifest.signing.enabled` - signs manifest responses with Ed25519, enabled by default.
+- `manifest.signing.privateKey` - private PKCS#8 key path; keep this file secret and backed up.
+- `manifest.signing.publicKey` - public X.509 key path used by launchers to pin server identity.
 - `mods.directory` - directory scanned for served mod jars, default `mods`.
 - `mods.exclude` - comma-separated substrings excluded from the manifest.
 
@@ -52,3 +55,5 @@ The server mod serves:
 
 - `/impulse/server.json`
 - `/impulse/mods/<file-name>.jar`
+
+The first dedicated-server start generates the signing key pair under `impulse/keys/`. Back up both files before moving the server. Replacing the key causes clients that pinned the previous identity to block manifest sync until they explicitly trust the new key.

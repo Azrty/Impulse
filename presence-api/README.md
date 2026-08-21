@@ -9,6 +9,8 @@ sed -i "s/replace-with-at-least-32-random-characters/$(openssl rand -hex 32)/" .
 npm run dev
 ```
 
+Set `CURSEFORGE_API_KEY` in `.env` to enable the optional CurseForge mod-verification proxy. The key stays server-side and is never returned to launcher or mod clients. Without it, the endpoint responds as unavailable and all other Presence API features continue normally.
+
 The API automatically loads `presence-api/.env`. Environment variables supplied by Docker or the operating system take priority over values in that file.
 
 Build the production container with `docker build -t impulse-presence .`. Run exactly one replica because state is intentionally in memory, and expose it behind HTTPS at `api.impulsemc.com`.

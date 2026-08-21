@@ -45,7 +45,7 @@ import java.util.zip.ZipEntry;
 public final class ImpulseManifestServer {
     private static HttpServer server;
     private static ExecutorService executor;
-    private static final Map<String, Sha1CacheEntry> sha1Cache = new HashMap<String, Sha1CacheEntry>();
+    private static final Map<String, HashCacheEntry> hashCache = new HashMap<String, HashCacheEntry>();
     private static final Object manifestCacheLock = new Object();
     private static final Object crashReportLock = new Object();
     private static final Map<String, List<Long>> crashReportRateLimits = new HashMap<String, List<Long>>();
@@ -94,8 +94,8 @@ public final class ImpulseManifestServer {
         HttpServer nextServer = HttpServer.create(new InetSocketAddress(config.manifestPort), config.manifestHttpBacklog);
         nextServer.createContext("/impulse/server.json", new HttpHandler() {
             public void handle(HttpExchange exchange) throws IOException {
-                byte[] body = buildManifestCached(requireConfig()).getBytes(StandardCharsets.UTF_8);
-                respond(exchange, 200, "application/json; charset=utf-8", body);
+                ManifestCacheEntry manifest = buildManifestCached(requireConfig());
+                respondManifest(exchange, manifest);
             }
         });
         nextServer.createContext("/impulse/mods", new HttpHandler() {
@@ -283,16 +283,29 @@ public final class ImpulseManifestServer {
         activeSelfJar = null;
     }
 
-    private static String buildManifestCached(ImpulseConfig config) throws IOException {
+    private static ManifestCacheEntry buildManifestCached(ImpulseConfig config) throws IOException {
         synchronized (manifestCacheLock) {
             String signature = manifestSignature(config);
             if (manifestCache != null && manifestCache.signature.equals(signature)) {
-                return manifestCache.json;
+                return manifestCache;
             }
             String json = buildManifest(config);
-            manifestCache = new ManifestCacheEntry(signature, json);
-            return json;
+            ImpulseManifestSigner.SignedManifest signed = ImpulseManifestSigner.sign(config, json.getBytes(StandardCharsets.UTF_8));
+            manifestCache = new ManifestCacheEntry(signature, json, signed);
+            return manifestCache;
         }
+    }
+
+    private static void respondManifest(HttpExchange exchange, ManifestCacheEntry manifest) throws IOException {
+        Headers headers = exchange.getResponseHeaders();
+        if (manifest.signed.isSigned()) {
+            headers.set("X-Impulse-Signature-Algorithm", ImpulseManifestSigner.ALGORITHM);
+            headers.set("X-Impulse-Public-Key", manifest.signed.publicKey);
+            headers.set("X-Impulse-Key-Id", manifest.signed.fingerprint);
+            headers.set("X-Impulse-Signature", manifest.signed.signature);
+            headers.set("Access-Control-Expose-Headers", "X-Impulse-Signature-Algorithm, X-Impulse-Public-Key, X-Impulse-Key-Id, X-Impulse-Signature");
+        }
+        respond(exchange, 200, "application/json; charset=utf-8", manifest.signed.body);
     }
 
     private static String manifestSignature(ImpulseConfig config) throws IOException {
@@ -499,13 +512,15 @@ public final class ImpulseManifestServer {
         for (int i = 0; i < mods.size(); i++) {
             ModFile mod = mods.get(i);
             ModRelationship relationship = relationships.get(mod.sha1.toLowerCase());
-            String stableId = relationship != null && relationship.id.length() > 0 ? relationship.id : (mod.modId.length() > 0 ? mod.modId : mod.sha1);
+            if (relationship == null) relationship = relationships.get(mod.sha512.toLowerCase());
+            String stableId = relationship != null && relationship.id.length() > 0 ? relationship.id : (mod.modId.length() > 0 ? mod.modId : mod.sha512);
             json.object();
             json.prop("id", stableId).comma();
             json.prop("name", mod.name).comma();
             json.prop("description", mod.description).comma();
             json.prop("file_name", mod.file.getName()).comma();
             json.prop("download_url", publicUrl(config, route + urlPath(mod.relativePath))).comma();
+            json.prop("sha512", mod.sha512).comma();
             json.prop("sha1", mod.sha1).comma();
             json.prop("size", mod.file.length()).comma();
             json.prop("required", required).comma();
@@ -580,7 +595,8 @@ public final class ImpulseManifestServer {
             if (!file.isFile() || !name.endsWith(".jar")) continue;
             if (isExcluded(config, name)) continue;
             ModMetadata metadata = readModMetadata(file);
-            out.add(new ModFile(file, cachedSha1(file), metadata.modId, metadata.name, metadata.description, file.getName(), null));
+            HashCacheEntry hashes = cachedHashes(file);
+            out.add(new ModFile(file, hashes.sha1, hashes.sha512, metadata.modId, metadata.name, metadata.description, file.getName(), null));
         }
         return out;
     }
@@ -640,7 +656,8 @@ public final class ImpulseManifestServer {
         }
         ModMetadata metadata = readModMetadata(file);
         String relative = relativePath(root, file);
-        mods.add(new ModFile(file, cachedSha1(file), metadata.modId, metadata.name, metadata.description, relative, categoryId));
+        HashCacheEntry hashes = cachedHashes(file);
+        mods.add(new ModFile(file, hashes.sha1, hashes.sha512, metadata.modId, metadata.name, metadata.description, relative, categoryId));
     }
 
     private static OptionalModCategory readOptionalCategory(File directory) {
@@ -987,9 +1004,9 @@ public final class ImpulseManifestServer {
         return value.getBytes(StandardCharsets.UTF_8);
     }
 
-    private static String sha1(File file) throws IOException {
+    private static String hash(File file, String algorithm) throws IOException {
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-1");
+            MessageDigest digest = MessageDigest.getInstance(algorithm);
             FileInputStream input = new FileInputStream(file);
             try {
                 byte[] buffer = new byte[8192];
@@ -1008,17 +1025,17 @@ public final class ImpulseManifestServer {
         }
     }
 
-    private static synchronized String cachedSha1(File file) throws IOException {
+    private static synchronized HashCacheEntry cachedHashes(File file) throws IOException {
         String key = file.getCanonicalPath();
         long modified = file.lastModified();
         long size = file.length();
-        Sha1CacheEntry cached = sha1Cache.get(key);
+        HashCacheEntry cached = hashCache.get(key);
         if (cached != null && cached.modified == modified && cached.size == size) {
-            return cached.sha1;
+            return cached;
         }
-        String hash = sha1(file);
-        sha1Cache.put(key, new Sha1CacheEntry(modified, size, hash));
-        return hash;
+        HashCacheEntry hashes = new HashCacheEntry(modified, size, hash(file, "SHA-1"), hash(file, "SHA-512"));
+        hashCache.put(key, hashes);
+        return hashes;
     }
 
     private static ModMetadata readModMetadata(File file) {
@@ -1276,15 +1293,17 @@ public final class ImpulseManifestServer {
     private static final class ModFile {
         final File file;
         final String sha1;
+        final String sha512;
         final String name;
         final String description;
         final String modId;
         final String relativePath;
         final String categoryId;
 
-        ModFile(File file, String sha1, String modId, String name, String description, String relativePath, String categoryId) {
+        ModFile(File file, String sha1, String sha512, String modId, String name, String description, String relativePath, String categoryId) {
             this.file = file;
             this.sha1 = sha1;
+            this.sha512 = sha512;
             this.name = cleanMetadataValue(name).length() > 0 ? cleanMetadataValue(name) : stripJar(file.getName());
             this.description = cleanMetadataValue(description);
             this.modId = cleanCategoryId(modId, "");
@@ -1355,15 +1374,17 @@ public final class ImpulseManifestServer {
         }
     }
 
-    private static final class Sha1CacheEntry {
+    private static final class HashCacheEntry {
         final long modified;
         final long size;
         final String sha1;
+        final String sha512;
 
-        Sha1CacheEntry(long modified, long size, String sha1) {
+        HashCacheEntry(long modified, long size, String sha1, String sha512) {
             this.modified = modified;
             this.size = size;
             this.sha1 = sha1;
+            this.sha512 = sha512;
         }
     }
 
@@ -1374,10 +1395,12 @@ public final class ImpulseManifestServer {
     private static final class ManifestCacheEntry {
         final String signature;
         final String json;
+        final ImpulseManifestSigner.SignedManifest signed;
 
-        ManifestCacheEntry(String signature, String json) {
+        ManifestCacheEntry(String signature, String json, ImpulseManifestSigner.SignedManifest signed) {
             this.signature = signature;
             this.json = json;
+            this.signed = signed;
         }
     }
 

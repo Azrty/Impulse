@@ -57,3 +57,15 @@ task runModUpdaterTest(type: JavaExec) {
 }
 
 check.dependsOn runModUpdaterTest
+
+task runCurseForgeFingerprintTest(type: JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    if (org.gradle.util.GradleVersion.current() < org.gradle.util.GradleVersion.version('6.4')) {
+        main = 'com.impulse.common.ImpulseCurseForgeFingerprintTest'
+    } else {
+        mainClass = 'com.impulse.common.ImpulseCurseForgeFingerprintTest'
+    }
+}
+
+check.dependsOn runCurseForgeFingerprintTest

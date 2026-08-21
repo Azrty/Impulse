@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 
@@ -38,6 +41,16 @@ export type PresenceServerOptions = {
   logger?: boolean;
   now?: () => number;
   verifyMojang?: MojangVerifier;
+  curseForgeApiKey?: string;
+  curseForgeFetch?: typeof fetch;
+};
+
+type CurseForgeRequestFile = { sha512: string; fingerprint: number };
+type CurseForgeFile = {
+  id?: number;
+  modId?: number;
+  fileName?: string;
+  gameVersions?: string[];
 };
 
 function base64url(value: string | Buffer): string {
@@ -124,6 +137,53 @@ async function defaultMojangVerifier(username: string, serverId: string): Promis
   return id && typeof body.name === 'string' ? { id, name: body.name } : null;
 }
 
+async function queryCurseForgeFingerprints(
+  apiKey: string,
+  fingerprints: number[],
+  requestFetch: typeof fetch,
+): Promise<Map<number, CurseForgeFile>> {
+  let lastError: unknown = new Error('CurseForge verification failed.');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await requestFetch('https://api.curseforge.com/v1/fingerprints/432', {
+        method: 'POST',
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'PrismLauncher/11.0.3',
+          'x-api-key': apiKey,
+        },
+        body: JSON.stringify({ fingerprints }),
+      });
+      if (!response.ok) {
+        const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+        if (!retryable) throw new Error(`CurseForge returned HTTP ${response.status}.`);
+        lastError = new Error(`CurseForge returned HTTP ${response.status}.`);
+        if (attempt < 2) {
+          const retryAfter = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
+          await new Promise((resolve) => setTimeout(resolve, Number.isFinite(retryAfter) ? Math.min(5_000, retryAfter * 1_000) : [250, 750][attempt]));
+          continue;
+        }
+        throw lastError;
+      }
+      const payload = await response.json() as { data?: { exactMatches?: Array<{ id?: number; file?: CurseForgeFile }> } };
+      const result = new Map<number, CurseForgeFile>();
+      for (const match of payload.data?.exactMatches ?? []) {
+        if (Number.isSafeInteger(match.id) && match.file) result.set(Number(match.id), match.file);
+      }
+      return result;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, [250, 750][attempt]));
+        continue;
+      }
+    }
+  }
+  throw lastError;
+}
+
 export async function createPresenceServer(options: PresenceServerOptions): Promise<FastifyInstance> {
   if (options.secret.length < 32) throw new Error('PRESENCE_JWT_SECRET must contain at least 32 characters.');
   const app = Fastify({ logger: options.logger ?? true, bodyLimit: 64 * 1024 });
@@ -134,6 +194,19 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   const presenceAliases = new Map<string, string>();
   const artwork = new Map<string, ArtworkEntry>();
   const tokenRates = new Map<string, RateBucket>();
+  const curseForgeRequests = new Map<string, Promise<Map<number, CurseForgeFile>>>();
+  const registryPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/recognized-mods.json');
+  let recognizedMods: { schema_version: number; mods: Record<string, { name: string }> } = { schema_version: 1, mods: {} };
+  try { recognizedMods = JSON.parse(await readFile(registryPath, 'utf8')); } catch (error) { app.log.warn({ error }, 'Unable to read recognized mod registry'); }
+  const recognizedModsBody = JSON.stringify(recognizedMods);
+  const recognizedModsEtag = `"${crypto.createHash('sha256').update(recognizedModsBody).digest('hex')}"`;
+
+  app.get('/v1/mod-verification/recognized-mods', async (request, reply) => {
+    reply.header('Cache-Control', 'public, max-age=3600, stale-if-error=86400');
+    reply.header('ETag', recognizedModsEtag);
+    if (request.headers['if-none-match'] === recognizedModsEtag) return reply.code(304).send();
+    return reply.type('application/json; charset=utf-8').send(recognizedModsBody);
+  });
 
   // Older Impulse clients sent bodyless POST requests through HttpURLConnection,
   // which labels them as form data. Accept only an empty form for compatibility.
@@ -150,6 +223,71 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     max: 120,
     timeWindow: '1 minute',
     keyGenerator: (request) => request.ip,
+  });
+
+  app.post('/v1/mod-verification/curseforge', async (request, reply) => {
+    const body = request.body as Record<string, unknown> | null;
+    const minecraftVersion = typeof body?.minecraft_version === 'string' ? body.minecraft_version.trim() : '';
+    const loader = typeof body?.loader === 'string' ? body.loader.trim().toLowerCase() : '';
+    const rawFiles = Array.isArray(body?.files) ? body.files : [];
+    if (!/^\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/u.test(minecraftVersion)
+      || !['forge', 'neoforge'].includes(loader)
+      || rawFiles.length < 1
+      || rawFiles.length > 100) {
+      return reply.code(400).send({ error: 'Invalid CurseForge verification request.' });
+    }
+    const files: CurseForgeRequestFile[] = [];
+    const seenHashes = new Set<string>();
+    for (const raw of rawFiles) {
+      const entry = raw as Record<string, unknown> | null;
+      const sha512 = typeof entry?.sha512 === 'string' ? entry.sha512.trim().toLowerCase() : '';
+      const fingerprint = Number(entry?.fingerprint);
+      if (!/^[0-9a-f]{128}$/u.test(sha512)
+        || !Number.isSafeInteger(fingerprint)
+        || fingerprint < 0
+        || fingerprint > 0xffffffff
+        || seenHashes.has(sha512)) {
+        return reply.code(400).send({ error: 'Invalid CurseForge verification file.' });
+      }
+      seenHashes.add(sha512);
+      files.push({ sha512, fingerprint });
+    }
+    const apiKey = options.curseForgeApiKey?.trim();
+    if (!apiKey) return reply.code(503).send({ error: 'CurseForge verification is unavailable.' });
+
+    const requestKey = JSON.stringify({ minecraftVersion, loader, fingerprints: [...new Set(files.map((file) => file.fingerprint))].sort((a, b) => a - b) });
+    let pending = curseForgeRequests.get(requestKey);
+    if (!pending) {
+      pending = queryCurseForgeFingerprints(
+        apiKey,
+        [...new Set(files.map((file) => file.fingerprint))],
+        options.curseForgeFetch ?? fetch,
+      ).finally(() => curseForgeRequests.delete(requestKey));
+      curseForgeRequests.set(requestKey, pending);
+    }
+    try {
+      const exactMatches = await pending;
+      const matches: Record<string, unknown> = {};
+      for (const file of files) {
+        const match = exactMatches.get(file.fingerprint);
+        if (!match) {
+          matches[file.sha512] = { status: 'Unverified' };
+          continue;
+        }
+        const versions = Array.isArray(match.gameVersions) ? match.gameVersions.map((value) => String(value).toLowerCase()) : [];
+        const compatible = versions.includes(minecraftVersion.toLowerCase()) && versions.includes(loader);
+        matches[file.sha512] = {
+          status: compatible ? 'Matched on CurseForge' : 'Incompatible CurseForge listing',
+          project_id: Number.isSafeInteger(match.modId) ? match.modId : null,
+          file_id: Number.isSafeInteger(match.id) ? match.id : null,
+          file_name: typeof match.fileName === 'string' ? match.fileName : null,
+        };
+      }
+      return { matches };
+    } catch (error) {
+      request.log.warn({ error }, 'CurseForge fingerprint verification failed');
+      return reply.code(502).send({ error: 'CurseForge verification is unavailable.' });
+    }
   });
 
   function consumeTokenRate(header: string | undefined): TokenPayload | false | null {

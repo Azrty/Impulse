@@ -62,7 +62,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.imageio.ImageIO;
 
 public final class ImpulseBadgeClient121 {
-    public static final String LEGAL_VERSION = "2026-08-15.3";
+    public static final String LEGAL_VERSION = "2026-08-20.2";
     private static final ResourceLocation BADGE_FONT = ResourceLocation.fromNamespaceAndPath("impulse", "player_badge");
     private static final ResourceLocation MUSIC_FONT = ResourceLocation.fromNamespaceAndPath("impulse", "music_presence");
     private static final Gson GSON = new Gson();

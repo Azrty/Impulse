@@ -69,6 +69,11 @@ public final class ImpulseStandaloneUi extends Application {
     private boolean completed;
     private boolean openRelationshipError;
     private boolean openDeleteConfirmation;
+    private boolean openModVerificationWarning;
+    private long modVerificationReadyAt;
+    private List<ImpulseStandaloneBootstrap.ManifestMod> pendingUnverifiedMods = new ArrayList<>();
+    private ImpulseStandaloneBootstrap.Profile pendingVerificationProfile;
+    private ImpulseStandaloneBootstrap.Discovery pendingVerificationDiscovery;
     private String relationshipError = "";
     private String status = "Choose a profile or add an Impulse server.";
     private String deleteProfileId;
@@ -1341,6 +1346,64 @@ public final class ImpulseStandaloneUi extends Application {
 
     private void renderModals() {
         renderGalleryLightbox();
+        if (openModVerificationWarning) {
+            ImGui.openPopup("Some server mods could not be independently verified");
+            openModVerificationWarning = false;
+        }
+        float warningWidth = Math.min(620.0F, Math.max(500.0F, ImGui.getIO().getDisplaySizeX() - 120.0F));
+        float warningHeight = Math.min(460.0F, Math.max(380.0F, ImGui.getIO().getDisplaySizeY() - 110.0F));
+        ImGui.setNextWindowSize(warningWidth, warningHeight, ImGuiCond.Appearing);
+        if (ImGui.beginPopupModal("Some server mods could not be independently verified", ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize)) {
+            ImGui.textColored(1.0F, 0.72F, 0.28F, 1.0F, "MOD VERIFICATION");
+            ImGui.text("Some server mods could not be independently verified");
+            ImGui.spacing();
+            ImGui.pushTextWrapPos(ImGui.getCursorPosX() + ImGui.getContentRegionAvailX());
+            ImGui.textColored(0.70F, 0.70F, 0.70F, 1.0F, "These files match the server's SHA-512 hashes, but Impulse could not match them to a compatible Modrinth or CurseForge release, or its recognized-mod registry. Mods can run code on your computer. Continue only if you trust this server.");
+            ImGui.popTextWrapPos();
+            ImGui.spacing();
+            ImGui.separator();
+            ImGui.spacing();
+            float listHeight = Math.max(105.0F, ImGui.getContentRegionAvailY() - 54.0F);
+            ImGui.beginChild("##unverified-mods", 0, listHeight, false);
+            for (int index = 0; index < pendingUnverifiedMods.size(); index++) {
+                ImpulseStandaloneBootstrap.ManifestMod mod = pendingUnverifiedMods.get(index);
+                String hash = clean(mod.sha512, "");
+                String statusLabel = mod.verification == null ? "Verification unavailable" : clean(mod.verification.status, "Verification unavailable");
+                ImGui.pushStyleColor(ImGuiCol.ChildBg, 0.055F, 0.055F, 0.055F, 1.0F);
+                ImGui.beginChild("##unverified-row-" + index, 0, 88, true, ImGuiWindowFlags.NoScrollbar);
+                ImGui.text(clean(mod.name, mod.file_name));
+                float statusWidth = ImGui.calcTextSizeX(statusLabel);
+                ImGui.sameLine(Math.max(ImGui.getCursorPosX() + 12.0F, ImGui.getWindowWidth() - statusWidth - 18.0F));
+                ImGui.textColored(1.0F, 0.72F, 0.28F, 1.0F, statusLabel);
+                ImGui.textDisabled(clean(mod.file_name, "mod.jar"));
+                ImGui.pushTextWrapPos(ImGui.getCursorPosX() + ImGui.getContentRegionAvailX());
+                ImGui.textDisabled("SHA-512  " + hash);
+                ImGui.popTextWrapPos();
+                if (ImGui.smallButton("Copy hash##sha512-" + index)) ImGui.setClipboardText(hash);
+                ImGui.endChild();
+                ImGui.popStyleColor();
+                if (index < pendingUnverifiedMods.size() - 1) ImGui.spacing();
+            }
+            ImGui.endChild();
+            int seconds = Math.max(0, (int) Math.ceil((modVerificationReadyAt - System.currentTimeMillis()) / 1000.0));
+            float cancelWidth = 120.0F;
+            float continueWidth = 190.0F;
+            ImGui.setCursorPosX(Math.max(ImGui.getCursorPosX(), ImGui.getWindowWidth() - cancelWidth - continueWidth - 32.0F));
+            if (outlineButton("Cancel", 120, 32)) {
+                pendingVerificationProfile = null; pendingVerificationDiscovery = null; pendingUnverifiedMods.clear(); ImGui.closeCurrentPopup();
+            }
+            ImGui.sameLine();
+            ImGui.beginDisabled(seconds > 0);
+            if (primaryButton(seconds > 0 ? "Continue anyway (" + seconds + ")" : "Continue anyway", 190, 32)) {
+                try {
+                    String signature = ImpulseStandaloneBootstrap.problematicSignature(pendingUnverifiedMods);
+                    ImpulseStandaloneBootstrap.acceptUnverifiedMods(gameDirectory(), pendingVerificationProfile.id, signature);
+                    ImGui.closeCurrentPopup(); finishSelected(pendingVerificationProfile.id);
+                } catch (Exception error) { status = clean(error.getMessage(), "Could not save the verification choice."); }
+            }
+            ImGui.endDisabled();
+            ImGui.endPopup();
+        }
         if (openInstallConfirmation) {
             ImGui.openPopup("Install custom mods?");
             openInstallConfirmation = false;
@@ -1570,7 +1633,12 @@ public final class ImpulseStandaloneUi extends Application {
             try {
                 ImpulseStandaloneBootstrap.Discovery found = ImpulseStandaloneBootstrap.discover(serverAddress);
                 ImpulseStandaloneBootstrap.validateRuntime(found.manifest, request.minecraft_version, request.loader, request.loader_version);
-                asyncResult = AsyncResult.success(action, profile, found);
+                ImpulseStandaloneBootstrap.Profile preparedProfile = profile;
+                if (action == AsyncAction.PLAY && preparedProfile != null) {
+                    List<String> selections = preparedProfile.selected_optional_ids == null ? Collections.emptyList() : preparedProfile.selected_optional_ids;
+                    preparedProfile = ImpulseStandaloneBootstrap.prepareProfileForLaunch(gameDirectory(), found, selections);
+                }
+                asyncResult = AsyncResult.success(action, preparedProfile, found);
             } catch (Throwable error) {
                 asyncResult = AsyncResult.failure(error);
             }
@@ -1594,8 +1662,19 @@ public final class ImpulseStandaloneUi extends Application {
             try {
                 List<String> selections = result.profile.selected_optional_ids == null
                     ? Collections.emptyList() : result.profile.selected_optional_ids;
-                ImpulseStandaloneBootstrap.Profile saved = ImpulseStandaloneBootstrap.saveProfile(gameDirectory(), discovery, selections);
-                finishSelected(saved.id);
+                List<ImpulseStandaloneBootstrap.ManifestMod> launchMods = ImpulseStandaloneBootstrap.launchMods(discovery.manifest, selections);
+                ImpulseStandaloneBootstrap.requireSha512(launchMods);
+                List<ImpulseStandaloneBootstrap.ManifestMod> problems = ImpulseStandaloneBootstrap.problematicMods(discovery.manifest, selections);
+                String signature = ImpulseStandaloneBootstrap.problematicSignature(problems);
+                if (!problems.isEmpty() && !signature.equals(result.profile.accepted_unverified_mod_signature)) {
+                    pendingUnverifiedMods = problems;
+                    pendingVerificationProfile = result.profile;
+                    pendingVerificationDiscovery = discovery;
+                    modVerificationReadyAt = System.currentTimeMillis() + 5000L;
+                    openModVerificationWarning = true;
+                    return;
+                }
+                finishSelected(result.profile.id);
             } catch (Exception error) {
                 status = clean(error.getMessage(), "Could not save this profile.");
             }
@@ -1788,6 +1867,12 @@ public final class ImpulseStandaloneUi extends Application {
         style.setFrameBorderSize(1);
         style.setColor(ImGuiCol.Text, 0.95F, 0.95F, 0.95F, 1.0F);
         style.setColor(ImGuiCol.TextDisabled, 0.58F, 0.58F, 0.58F, 1.0F);
+        style.setColor(ImGuiCol.WindowBg, 0.018F, 0.018F, 0.018F, 1.0F);
+        style.setColor(ImGuiCol.PopupBg, 0.025F, 0.025F, 0.025F, 1.0F);
+        style.setColor(ImGuiCol.TitleBg, 0.025F, 0.025F, 0.025F, 1.0F);
+        style.setColor(ImGuiCol.TitleBgActive, 0.025F, 0.025F, 0.025F, 1.0F);
+        style.setColor(ImGuiCol.TitleBgCollapsed, 0.025F, 0.025F, 0.025F, 1.0F);
+        style.setColor(ImGuiCol.ModalWindowDimBg, 0.0F, 0.0F, 0.0F, 0.72F);
         style.setColor(ImGuiCol.Border, 0.28F, 0.28F, 0.28F, 0.75F);
         style.setColor(ImGuiCol.ChildBg, 0.025F, 0.025F, 0.025F, 0.82F);
         style.setColor(ImGuiCol.FrameBg, 0.08F, 0.08F, 0.08F, 0.96F);

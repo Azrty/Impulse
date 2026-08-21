@@ -115,6 +115,10 @@ function sha1(path) {
   return createHash('sha1').update(readFileSync(path)).digest('hex')
 }
 
+function sha512(path) {
+  return createHash('sha512').update(readFileSync(path)).digest('hex')
+}
+
 function artifactFor(target, releaseVersion) {
   const fileName = `impulse-${target.project}-${releaseVersion}.jar`
   if (ARTIFACT_OVERRIDE) {
@@ -201,6 +205,7 @@ async function main() {
       file_name: artifact.fileName,
       download_url: `${PUBLIC_ORIGIN}/mods/${encodeURIComponent(artifact.fileName)}`,
       sha1: sha1(output),
+      sha512: sha512(output),
       sha256: checksum,
       size: readFileSync(output).length,
     }
