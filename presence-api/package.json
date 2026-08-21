@@ -13,7 +13,7 @@
     "start": "node dist/src/index.js",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
-    ,"mods:recognize": "node scripts/recognize-mod.mjs && npm test"
+    ,"mods:recognize": "node scripts/recognize-mod.mjs"
   },
   "dependencies": {
     "@fastify/rate-limit": "^10.3.0",
