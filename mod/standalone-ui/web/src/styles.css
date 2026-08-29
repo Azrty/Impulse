@@ -66,17 +66,25 @@ button:disabled { opacity: .42; cursor: default; }
 .playbar { height: 66px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 42px minmax(240px, 420px) 42px; justify-content: center; align-items: center; gap: 10px; padding: 10px 22px; background: rgba(5,5,5,.97); }
 .icon-button { width: 40px; height: 40px; display: grid; place-items: center; border: 1px solid var(--line); background: #0b0b0b; border-radius: 6px; }
 .icon-button:hover { background: #161616; }
-.play-button { position: relative; height: 44px; overflow: hidden; border-radius: 6px; background: #f4f4f4; color: #090909; font-weight: 650; }
+.play-button { position: relative; isolation: isolate; height: 44px; overflow: hidden; border-radius: 6px; background: #f4f4f4; color: #090909; font-weight: 650; transition: background-color .2s ease, box-shadow .2s ease, transform .16s ease; }
+.play-button::before { content: ''; position: absolute; z-index: 1; top: -40%; bottom: -40%; left: 0; width: 34%; pointer-events: none; background: linear-gradient(100deg, transparent, rgba(255,255,255,.7), transparent); opacity: 0; transform: translateX(-160%) skewX(-16deg); transition: transform 280ms ease, opacity 80ms ease; }
 .profile-actions { position: relative; }
 .context-menu { position: absolute; z-index: 15; right: 0; bottom: calc(100% + 9px); width: 190px; padding: 5px; border: 1px solid rgba(255,255,255,.14); border-radius: 7px; background: #101010; box-shadow: 0 18px 55px rgba(0,0,0,.7); animation: modal-in .15s ease; }
 .context-menu button { width: 100%; height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 5px; background: transparent; text-align: left; font-size: 11px; }
 .context-menu button:hover { background: #1b1b1b; }
 .context-menu button.destructive { color: #ffaaa0; }
 .context-menu > div { height: 1px; margin: 4px 5px; background: var(--line); }
-.play-button:hover:not(:disabled) { background: #fff; box-shadow: 0 0 22px rgba(255,255,255,.12); transform: translateY(-1px); }
-.play-button:active:not(:disabled) { transform: translateY(0) scale(.995); }
+.play-button:hover:not(:disabled) { background: #fff; box-shadow: 0 0 26px rgba(255,255,255,.16); transform: translateY(-1px); }
+.play-button:hover:not(:disabled)::before { opacity: .65; transform: translateX(395%) skewX(-16deg); }
+.play-button:active:not(:disabled) { transform: translateY(0) scale(.985); }
 .play-content { position: relative; z-index: 2; display: flex; height: 100%; align-items: center; justify-content: center; gap: 9px; }
-.play-fill { position: absolute; inset: 0 auto 0 0; background: #d2d2d2; transition: width .25s ease; }
+.play-label { display: inline-block; }
+.play-content svg, .play-label { transition: transform .2s ease; }
+.play-button:hover:not(:disabled) .play-content svg { transform: translateX(2px) scale(1.06); }
+.play-button:hover:not(:disabled) .play-label { transform: scale(1.06); }
+.play-fill { position: absolute; z-index: 0; inset: 0 auto 0 0; background: #d2d2d2; transition: width .25s ease; }
+.cancel-launch { color: #ddd; }
+.cancel-launch:hover { color: #fff; background: #211010; border-color: rgba(255,120,120,.3); }
 .empty-server, .restriction { grid-row: 1 / -1; display: grid; place-items: center; text-align: center; padding: 30px; }
 .empty-server > div { max-width: 430px; }
 .empty-server svg { width: 36px; height: 36px; color: #777; }

@@ -39,6 +39,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /** WebView standalone profile selector launched before NeoForge mod discovery. */
 public final class ImpulseStandaloneUi {
@@ -176,6 +177,7 @@ public final class ImpulseStandaloneUi {
         }
         if ("start".equals(action)) return startOperation(required(command, "kind"), command);
         if ("operation".equals(action)) return operationMap.get(required(command, "id"));
+        if ("cancelOperation".equals(action)) return cancelOperation(required(command, "id"));
         if ("image".equals(action)) return image(required(command, "url"));
         if ("clipboardRead".equals(action)) return clipboardRead();
         if ("clipboardWrite".equals(action)) {
@@ -232,8 +234,16 @@ public final class ImpulseStandaloneUi {
         String id = UUID.randomUUID().toString();
         Operation operation = new Operation(id, kind);
         operationMap.put(id, operation);
-        operations.submit(() -> execute(operation, command));
+        operation.attach(operations.submit(() -> execute(operation, command)));
         return id;
+    }
+
+    private Operation cancelOperation(String id) throws IOException {
+        Operation operation = operationMap.get(id);
+        if (operation == null) throw new IOException("The launch operation no longer exists.");
+        if (!"play".equals(operation.kind)) throw new IOException("Only a game launch can be cancelled here.");
+        operation.cancel();
+        return operation;
     }
 
     private void execute(Operation operation, JsonObject command) {
@@ -264,6 +274,11 @@ public final class ImpulseStandaloneUi {
             }
             operation.done(operation.result);
         } catch (Throwable error) {
+            if (operation.cancelRequested || Thread.currentThread().isInterrupted()) {
+                operation.cancelled();
+                System.out.println("[Impulse UI] Launch cancelled.");
+                return;
+            }
             if (error instanceof ImpulseStandaloneBootstrap.RestrictedServerException restricted) {
                 currentRestriction = restricted;
             }
@@ -364,15 +379,18 @@ public final class ImpulseStandaloneUi {
     }
 
     private void play(Operation operation, String profileId, boolean acceptUnverified) throws Exception {
+        ensureLaunchActive(operation);
         currentRestriction = null;
         ImpulseStandaloneBootstrap.Profile profile = requireProfile(profileId);
         ImpulseStandaloneBootstrap.RestrictedServerException restriction = ImpulseStandaloneBootstrap.serverRestriction(profile.address);
         if (restriction != null) throw restriction;
         operation.update("Checking server", 0, 1);
         ImpulseStandaloneBootstrap.Discovery discovery = ImpulseStandaloneBootstrap.discover(profile.address);
+        ensureLaunchActive(operation);
         ImpulseStandaloneBootstrap.validateRuntime(discovery.manifest, request.minecraft_version, request.loader, request.loader_version);
         ImpulseStandaloneBootstrap.Profile prepared = ImpulseStandaloneBootstrap.prepareProfileForLaunch(
             gameDirectory, discovery, profile.selected_optional_ids);
+        ensureLaunchActive(operation);
         List<ImpulseStandaloneBootstrap.ManifestMod> problems = ImpulseStandaloneBootstrap.problematicMods(
             discovery.manifest, prepared.selected_optional_ids);
         String signature = ImpulseStandaloneBootstrap.problematicSignature(problems);
@@ -397,6 +415,10 @@ public final class ImpulseStandaloneUi {
         }, "impulse-web-close");
         closer.setDaemon(true);
         closer.start();
+    }
+
+    private static void ensureLaunchActive(Operation operation) throws InterruptedException {
+        if (operation.cancelRequested || Thread.currentThread().isInterrupted()) throw new InterruptedException("Launch cancelled.");
     }
 
     private void searchMods(Operation operation, JsonObject command) throws Exception {
@@ -801,15 +823,31 @@ public final class ImpulseStandaloneUi {
         volatile int total = 1;
         volatile Object result;
         volatile String error;
+        volatile boolean cancelRequested;
+        transient volatile Future<?> future;
 
         Operation(String id, String kind) { this.id = id; this.kind = kind; }
         void update(String message, int completed, int total) {
+            if (cancelRequested) return;
             this.message = clean(message, "Working");
             this.completed = Math.max(0, completed);
             this.total = Math.max(1, total);
         }
-        void done(Object result) { this.result = result; this.status = "done"; }
-        void fail(Throwable error) { this.error = clean(error.getMessage(), error.getClass().getSimpleName()); this.status = "error"; }
+        void attach(Future<?> future) {
+            this.future = future;
+            if (cancelRequested) future.cancel(true);
+        }
+        void cancel() {
+            if (!"running".equals(status)) return;
+            cancelRequested = true;
+            message = "Cancelling";
+            Future<?> active = future;
+            if (active != null) active.cancel(true);
+            status = "cancelled";
+        }
+        void cancelled() { cancelRequested = true; status = "cancelled"; message = "Cancelled"; }
+        void done(Object result) { if (!cancelRequested) { this.result = result; this.status = "done"; } }
+        void fail(Throwable error) { if (!cancelRequested) { this.error = clean(error.getMessage(), error.getClass().getSimpleName()); this.status = "error"; } }
     }
 
     private static final class ImageJob {

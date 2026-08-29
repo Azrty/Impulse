@@ -17,7 +17,7 @@ import java.lang.reflect.Method;
 @Mod(modid = ImpulseForge112.MODID, name = "Impulse", version = ImpulseForge112.VERSION, acceptableRemoteVersions = "*")
 public final class ImpulseForge112 {
     public static final String MODID = "impulse";
-    public static final String VERSION = "1.2.0";
+    public static final String VERSION = "1.3.0-beta.1";
 
     public ImpulseForge112() {
         MinecraftForge.EVENT_BUS.register(this);

@@ -78,9 +78,25 @@ export function App() {
     const edit = async (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
       const key = event.key.toLowerCase();
-      if (!['c', 'x', 'v'].includes(key)) return;
+      if (!['a', 'c', 'x', 'v'].includes(key)) return;
       const target = event.target;
       const editable = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+      if (key === 'a') {
+        if (editable) {
+          event.preventDefault();
+          target.select();
+          return;
+        }
+        if (target instanceof HTMLElement && target.isContentEditable) {
+          event.preventDefault();
+          const range = document.createRange();
+          range.selectNodeContents(target);
+          const selection = window.getSelection();
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+        }
+        return;
+      }
       if (key === 'v') {
         if (!editable || target.disabled || target.readOnly) return;
         event.preventDefault();
@@ -124,6 +140,11 @@ export function App() {
         setOperation(next);
         if (next.status === 'running') return;
         if (pollRef.current) window.clearInterval(pollRef.current);
+        if (next.status === 'cancelled') {
+          await loadState();
+          setOperation(undefined);
+          return;
+        }
         if (next.status === 'error') {
           await loadState();
           setError(next.error || 'The operation failed.');
@@ -174,7 +195,19 @@ export function App() {
     setTab('overview');
   };
 
-  const launch = (acceptUnverified = false) => profile && start('play', { profile_id: profile.id, accept_unverified: acceptUnverified });
+  const launch = (acceptUnverified = false) => {
+    setProfileMenuOpen(false);
+    if (profile) start('play', { profile_id: profile.id, accept_unverified: acceptUnverified });
+  };
+  const cancelLaunch = async () => {
+    if (!operation?.id || operation.kind !== 'play' || operation.status !== 'running') return;
+    try {
+      setOperation(current => current ? { ...current, message: 'Cancelling' } : current);
+      await invoke('cancelOperation', { id: operation.id });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -213,11 +246,13 @@ export function App() {
                 <button className="icon-button" title="Refresh server" disabled={busy} onClick={() => start('refresh', { profile_id: profile.id })}><RefreshCw size={18} /></button>
                 <button className="play-button" disabled={busy || !manifest} onClick={() => launch(false)}>
                   <span className="play-fill" style={{ width: busy ? `${Math.max(5, progress * 100)}%` : '0%' }} />
-                  <span className="play-content">{busy ? <LoaderCircle className="spin" size={19} /> : <Play size={19} fill="currentColor" />}{busy ? operation?.message : 'Play'}</span>
+                  <span className="play-content">{busy ? <LoaderCircle className="spin" size={19} /> : <Play size={19} fill="currentColor" />}<span className="play-label">{busy ? operation?.message : 'Play'}</span></span>
                 </button>
                 <div className="profile-actions">
-                  <button className="icon-button" title="Profile actions" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen(value => !value)}><MoreHorizontal size={20} /></button>
-                  {profileMenuOpen && <div className="context-menu">
+                  {busy && operation?.kind === 'play'
+                    ? <button className="icon-button cancel-launch" title="Cancel launch" aria-label="Cancel launch" onClick={cancelLaunch}><X size={20} /></button>
+                    : <button className="icon-button" title="Profile actions" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen(value => !value)}><MoreHorizontal size={20} /></button>}
+                  {!busy && profileMenuOpen && <div className="context-menu">
                     <button onClick={() => { setProfileMenuOpen(false); setReportOpen(true); }}><Flag size={16} /> Report server</button>
                     <div />
                     <button className="destructive" onClick={() => { setProfileMenuOpen(false); setDeleteOpen(true); }}><Trash2 size={16} /> Remove server</button>

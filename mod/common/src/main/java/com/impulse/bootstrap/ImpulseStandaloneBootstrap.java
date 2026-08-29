@@ -15,11 +15,13 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -614,6 +616,7 @@ public final class ImpulseStandaloneBootstrap {
     }
 
     public static Profile prepareProfileForLaunch(File gameDirectory, Discovery discovery, List<String> selectedOptionalIds) throws Exception {
+        checkCancelled();
         Profile profile = saveProfile(gameDirectory, discovery, selectedOptionalIds);
         File profileRoot = new File(standaloneRoot(gameDirectory), profile.id);
         File managedMods = new File(profileRoot, "mods");
@@ -621,6 +624,10 @@ public final class ImpulseStandaloneBootstrap {
         List<ManifestMod> effective = resolveEffectiveMods(discovery.manifest, profile.selected_optional_ids);
         requireSha512(effective);
         syncMods(gameDirectory, managedMods, discovery, effective);
+        checkCancelled();
+        // Re-run catalog matching after the exact downloaded files have passed SHA-512 validation.
+        verifyManifestModOrigins(discovery.manifest);
+        checkCancelled();
         finalizeManifestModOrigins(gameDirectory, discovery.manifest, effective, managedMods);
         writeTextAtomic(new File(profileRoot, "manifest.json"), GSON.toJson(discovery.manifest));
         return profile;
@@ -1007,6 +1014,7 @@ public final class ImpulseStandaloneBootstrap {
     }
 
     private static void syncMods(File gameDirectory, File managedDirectory, Discovery discovery, List<ManifestMod> mods) throws Exception {
+        checkCancelled();
         Map<String, File> globalHashes = new HashMap<String, File>();
         Map<String, File> globalIds = new HashMap<String, File>();
         scanGlobalMods(new File(gameDirectory, "mods"), globalHashes, globalIds);
@@ -1038,6 +1046,7 @@ public final class ImpulseStandaloneBootstrap {
         List<Future<File>> futures = new ArrayList<Future<File>>();
         try {
             for (final ManifestMod mod : desired.values()) {
+                checkCancelled();
                 final File target = new File(managedDirectory, safeFileName(mod.file_name));
                 if (target.isFile() && mod.sha512.equals(sha512(target))) continue;
                 futures.add(downloads.submit(new Callable<File>() {
@@ -1051,6 +1060,7 @@ public final class ImpulseStandaloneBootstrap {
                 }));
             }
             for (Future<File> future : futures) {
+                checkCancelled();
                 try {
                     future.get();
                 } catch (ExecutionException error) {
@@ -1068,6 +1078,7 @@ public final class ImpulseStandaloneBootstrap {
         int verified = 0;
         try {
             for (ManifestMod mod : desired.values()) {
+                checkCancelled();
                 File target = new File(managedDirectory, safeFileName(mod.file_name));
                 progressReporter.progress("Verifying " + displayName(mod), verified, Math.max(1, desired.size()));
                 String hash = sha512(target);
@@ -1102,12 +1113,14 @@ public final class ImpulseStandaloneBootstrap {
         Exception last = null;
         long[] delays = new long[] { 500L, 1500L, 3000L };
         for (int attempt = 1; attempt <= 3; attempt++) {
+            checkCancelled();
             try {
                 download(url, target, mod.size);
                 String actual = sha512(target);
                 if (!mod.sha512.equals(actual)) throw new IOException("SHA-512 mismatch for " + mod.file_name + ": expected " + mod.sha512 + ", got " + actual);
                 return;
             } catch (Exception error) {
+                if (error instanceof InterruptedException || error instanceof InterruptedIOException || Thread.currentThread().isInterrupted()) throw error;
                 last = error;
                 if (attempt < 3) Thread.sleep(delays[attempt - 1]);
             }
@@ -1126,7 +1139,7 @@ public final class ImpulseStandaloneBootstrap {
         }
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setConnectTimeout(5000);
-        connection.setReadTimeout(30000);
+        connection.setReadTimeout(1000);
         connection.setRequestProperty("User-Agent", "Impulse-Standalone/0.1");
         if (existing > 0) connection.setRequestProperty("Range", "bytes=" + existing + "-");
         int status = connection.getResponseCode();
@@ -1140,8 +1153,21 @@ public final class ImpulseStandaloneBootstrap {
         FileOutputStream output = new FileOutputStream(part, append);
         try {
             byte[] buffer = new byte[64 * 1024];
-            int read;
-            while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
+            long lastProgress = System.currentTimeMillis();
+            while (true) {
+                checkCancelled();
+                try {
+                    int read = input.read(buffer);
+                    if (read < 0) break;
+                    output.write(buffer, 0, read);
+                    lastProgress = System.currentTimeMillis();
+                } catch (SocketTimeoutException timeout) {
+                    checkCancelled();
+                    if (System.currentTimeMillis() - lastProgress >= 30000L) {
+                        throw new IOException("Download timed out for " + target.getName() + ".", timeout);
+                    }
+                }
+            }
         } finally {
             output.close();
             input.close();
@@ -1151,6 +1177,10 @@ public final class ImpulseStandaloneBootstrap {
             throw new IOException("Incomplete download for " + target.getName() + ": expected " + expectedSize + " bytes, got " + part.length());
         }
         moveAtomic(part, target);
+    }
+
+    private static void checkCancelled() throws InterruptedIOException {
+        if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("Launch cancelled.");
     }
 
     private static URL downloadUrl(Discovery discovery, ManifestMod mod) throws IOException {

@@ -35,7 +35,7 @@ export type Project = SearchProject & { body?: string; authors?: string[]; featu
 export type Version = { id: string; name?: string; version_number: string; version_type?: string; changelog?: string; date_published?: string; files?: { filename: string; size: number }[] };
 export type InstallPlan = { channel: string; items: Record<string, { project: Project; version: Version; file: { filename: string; size: number }; explicit: boolean; required_by?: string[] }>; optional_dependencies?: { project_id: string; name: string }[] };
 export type GlobalMod = { file_name: string; name?: string; project_id?: string; version_number?: string; compatibility?: string; reason?: string; icon_url?: string; size?: number; managed?: boolean };
-export type Operation = { id: string; kind: string; status: 'running' | 'done' | 'error'; message: string; completed?: number; total?: number; result?: unknown; error?: string };
+export type Operation = { id: string; kind: string; status: 'running' | 'done' | 'error' | 'cancelled'; message: string; completed?: number; total?: number; result?: unknown; error?: string };
 export type State = {
   legal_accepted: boolean;
   legal_version: string;

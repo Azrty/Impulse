@@ -2451,6 +2451,9 @@ async function curseForgeFingerprint(filePath, sha512) {
 }
 
 async function finalizeManifestModVerification(minecraftPath, profile, serverEntry) {
+  // Refresh Modrinth and Impulse-registry verdicts after the profile contains the
+  // exact SHA-512-validated jars. The manifest-time result may be transient.
+  await verifyManifestModOrigins(serverEntry.manifest, getNetworkTimeout());
   const profileDir = new ProfileManager(minecraftPath).getProfileDir(serverEntry.profileId);
   const activeMods = profile.mods || [];
   const byHash = new Map();
