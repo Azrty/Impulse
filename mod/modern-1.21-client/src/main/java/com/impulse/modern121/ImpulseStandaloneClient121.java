@@ -324,6 +324,7 @@ public final class ImpulseStandaloneClient121 {
         private String status = "Enter the Minecraft server address to continue.";
         private boolean checking;
         private int optionalPage;
+        private ImpulseStandaloneBootstrap.RestrictedServerException restriction;
 
         private SetupScreen(Screen parent, ImpulseStandaloneBootstrap.Profile existing) {
             super(Component.literal(existing == null ? "Add Impulse server" : "Refresh Impulse server"));
@@ -335,6 +336,20 @@ public final class ImpulseStandaloneClient121 {
             int center = this.width / 2;
             int panelWidth = Math.min(360, Math.max(220, this.width - 32));
             int left = center - panelWidth / 2;
+            if (this.restriction != null) {
+                this.addRenderableWidget(Button.builder(Component.literal("Back"), button -> {
+                    this.restriction = null;
+                    rebuildWidgets();
+                }).bounds(center - (this.existing == null ? 60 : 124), this.height - 46, 120, 20).build());
+                if (this.existing != null) {
+                    this.addRenderableWidget(Button.builder(Component.literal("Remove server"), button -> {
+                        try { ImpulseStandaloneBootstrap.deleteProfile(gameDirectory(), this.existing.id); }
+                        catch (Exception ignored) { }
+                        this.minecraft.setScreen(this.parent);
+                    }).bounds(center + 4, this.height - 46, 120, 20).build());
+                }
+                return;
+            }
             this.address = new EditBox(this.font, left, 42, panelWidth, 20, Component.literal("Server address"));
             this.address.setMaxLength(255);
             this.address.setValue(this.existing == null ? "" : this.existing.address);
@@ -400,6 +415,7 @@ public final class ImpulseStandaloneClient121 {
                     });
                 } catch (final Exception error) {
                     this.minecraft.execute(() -> {
+                        if (error instanceof ImpulseStandaloneBootstrap.RestrictedServerException blocked) this.restriction = blocked;
                         this.status = error.getMessage() == null ? "Could not reach this Impulse server." : error.getMessage();
                         this.checking = false;
                         rebuildWidgets();
@@ -455,6 +471,22 @@ public final class ImpulseStandaloneClient121 {
         }
 
         public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+            if (this.restriction != null) {
+                graphics.fill(0, 0, this.width, this.height, 0xFF050505);
+                int center = this.width / 2;
+                int top = Math.max(32, this.height / 2 - 78);
+                graphics.renderOutline(center - 22, top, 44, 44, 0xFF777777);
+                graphics.drawCenteredString(this.font, "LOCKED", center, top + 18, 0xFFFFFFFF);
+                graphics.drawCenteredString(this.font, ImpulseStandaloneBootstrap.SERVER_ACCESS_RESTRICTED_HEADING, center, top + 58, 0xFFFFFFFF);
+                graphics.drawCenteredString(this.font, this.restriction.title, center, top + 76, 0xFFE2E2E2);
+                List<FormattedCharSequence> reason = this.font.split(Component.literal(this.restriction.description), Math.min(460, this.width - 36));
+                for (int i = 0; i < Math.min(3, reason.size()); i++) {
+                    graphics.drawCenteredString(this.font, reason.get(i), center, top + 94 + i * 10, 0xFFAAAAAA);
+                }
+                graphics.drawCenteredString(this.font, "Restricted address: " + this.restriction.host, center, top + 132, 0xFF777777);
+                renderWidgets(this, graphics, mouseX, mouseY, partialTick);
+                return;
+            }
             graphics.fill(0, 0, this.width, this.height, 0xFF0D0D0D);
             int panelWidth = Math.min(392, Math.max(236, this.width - 16));
             int panelLeft = this.width / 2 - panelWidth / 2;

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
@@ -52,6 +53,37 @@ type CurseForgeFile = {
   fileName?: string;
   gameVersions?: string[];
 };
+
+export const BLOCKED_SERVER_REASON_CODES = new Set([
+  'malware',
+  'credential_theft',
+  'phishing_impersonation',
+  'compromised_server',
+  'unsafe_mod_distribution',
+  'fraud',
+  'illegal_distribution',
+  'abusive_content',
+  'repeated_security_incidents',
+  'policy_violation',
+]);
+
+type BlockedServerEntry = { host: string; ipv4: string[]; reason_code: string };
+
+export function sanitizeBlockedServerRegistry(value: unknown): { schema_version: 1; servers: BlockedServerEntry[] } {
+  const source = value as { servers?: unknown } | null;
+  const servers: BlockedServerEntry[] = [];
+  for (const raw of Array.isArray(source?.servers) ? source.servers : []) {
+    const entry = raw as Record<string, unknown> | null;
+    const host = typeof entry?.host === 'string' ? entry.host.trim().toLowerCase().replace(/\.$/u, '') : '';
+    if (!host || host.length > 253 || !/^[a-z0-9.-]+$/u.test(host) || host.startsWith('.') || host.endsWith('.') || host.includes('..')) continue;
+    const ipv4 = [...new Set((Array.isArray(entry?.ipv4) ? entry.ipv4 : []).map(String).filter((address) => isIP(address) === 4))].sort();
+    const requestedCode = typeof entry?.reason_code === 'string' ? entry.reason_code.trim().toLowerCase() : '';
+    const reason_code = BLOCKED_SERVER_REASON_CODES.has(requestedCode) ? requestedCode : 'policy_violation';
+    servers.push({ host, ipv4, reason_code });
+  }
+  servers.sort((left, right) => left.host.localeCompare(right.host));
+  return { schema_version: 1, servers };
+}
 
 class CurseForgeRequestError extends Error {
   constructor(message: string, readonly retryable: boolean) {
@@ -218,12 +250,34 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   try { recognizedMods = JSON.parse(await readFile(registryPath, 'utf8')); } catch (error) { app.log.warn({ error }, 'Unable to read recognized mod registry'); }
   const recognizedModsBody = JSON.stringify(recognizedMods);
   const recognizedModsEtag = `"${crypto.createHash('sha256').update(recognizedModsBody).digest('hex')}"`;
+  const blockedServersPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/blocked-servers.json');
+  let blockedServers: { schema_version: 1; servers: BlockedServerEntry[] } = { schema_version: 1, servers: [] };
+  try { blockedServers = sanitizeBlockedServerRegistry(JSON.parse(await readFile(blockedServersPath, 'utf8'))); } catch (error) { app.log.warn({ error }, 'Unable to read blocked server registry'); }
+  async function currentBlockedServers(): Promise<{ body: string; etag: string }> {
+    try {
+      const candidate = JSON.parse(await readFile(blockedServersPath, 'utf8'));
+      if (candidate?.schema_version !== 1 || !Array.isArray(candidate.servers)) throw new Error('Invalid blocked server registry.');
+      blockedServers = sanitizeBlockedServerRegistry(candidate);
+    } catch (error) {
+      app.log.warn({ error }, 'Unable to refresh blocked server registry; serving last valid copy');
+    }
+    const body = JSON.stringify(blockedServers);
+    return { body, etag: `"${crypto.createHash('sha256').update(body).digest('hex')}"` };
+  }
 
   app.get('/v1/mod-verification/recognized-mods', async (request, reply) => {
     reply.header('Cache-Control', 'public, max-age=3600, stale-if-error=86400');
     reply.header('ETag', recognizedModsEtag);
     if (request.headers['if-none-match'] === recognizedModsEtag) return reply.code(304).send();
     return reply.type('application/json; charset=utf-8').send(recognizedModsBody);
+  });
+
+  app.get('/v1/security/blocked-servers', async (request, reply) => {
+    const registry = await currentBlockedServers();
+    reply.header('Cache-Control', 'public, max-age=300, stale-if-error=86400');
+    reply.header('ETag', registry.etag);
+    if (request.headers['if-none-match'] === registry.etag) return reply.code(304).send();
+    return reply.type('application/json; charset=utf-8').send(registry.body);
   });
 
   // Older Impulse clients sent bodyless POST requests through HttpURLConnection,

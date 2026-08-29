@@ -10,15 +10,32 @@ java {
 
 repositories {
     mavenCentral()
+    maven { url 'https://jitpack.io' }
 }
 
 dependencies {
     implementation project(':common')
     implementation 'com.google.code.gson:gson:2.2.4'
-    implementation 'com.twelvemonkeys.imageio:imageio-webp:3.12.0'
-    implementation('io.github.spair:imgui-java-app:1.92.0') {
-        exclude group: 'org.lwjgl', module: 'lwjgl-sdl'
-    }
+    implementation 'com.github.webview:webview_java:1.3.0'
+}
+
+def webDirectory = file('web')
+def webDist = file('web/dist')
+
+tasks.register('installWebDependencies', Exec) {
+    workingDir webDirectory
+    inputs.files(file('web/package.json'), file('web/package-lock.json'))
+    outputs.dir(file('web/node_modules'))
+    commandLine 'npm', 'ci', '--no-audit', '--no-fund'
+}
+
+tasks.register('buildWeb', Exec) {
+    dependsOn 'installWebDependencies'
+    workingDir webDirectory
+    inputs.dir(file('web/src'))
+    inputs.files(file('web/index.html'), file('web/package.json'), file('web/vite.config.ts'), file('web/tsconfig.json'))
+    outputs.dir webDist
+    commandLine 'npm', 'run', 'build'
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -26,8 +43,12 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 tasks.named('jar', Jar).configure {
+    dependsOn 'buildWeb'
     archiveBaseName = 'impulse-standalone-ui'
     manifest {
         attributes 'Main-Class': 'com.impulse.standalone.ui.ImpulseStandaloneUi'
+    }
+    from(webDist) {
+        into 'standalone-web'
     }
 }

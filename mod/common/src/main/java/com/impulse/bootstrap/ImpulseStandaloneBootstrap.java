@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URI;
@@ -60,6 +61,7 @@ import java.util.regex.Pattern;
 public final class ImpulseStandaloneBootstrap {
     public static final String LEGAL_DOCUMENT_VERSION = "2026-08-20.2";
     public static final String OUTDATED_HASH_MESSAGE = "This server uses an outdated mod manifest that does not provide SHA-512 hashes. Ask the server owner to update Impulse.";
+    public static final String SERVER_ACCESS_RESTRICTED_HEADING = "Access to this server has been restricted by Impulse";
     public static final String PRIVACY_POLICY_URL = "https://impulsemc.com/privacy/";
     public static final String TERMS_OF_SERVICE_URL = "https://impulsemc.com/terms/";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
@@ -67,14 +69,17 @@ public final class ImpulseStandaloneBootstrap {
     private static final int DEFAULT_MANIFEST_PORT = 25850;
     private static final int MAX_MANIFEST_BYTES = 8 * 1024 * 1024;
     private static final String CURSEFORGE_VERIFICATION_URL = "https://api.impulsemc.com/v1/mod-verification/curseforge";
+    private static final String BLOCKED_SERVERS_URL = "https://api.impulsemc.com/v1/security/blocked-servers";
     private static final Pattern MOTD_PORT = Pattern.compile("\\[impulse:(\\d{1,5})]", Pattern.CASE_INSENSITIVE);
     private static final Pattern TEXT_PORT = Pattern.compile("(?:impulse[-_\\s]*(?:manifest[-_\\s]*)?|manifest[-_\\s]*)port\\s*[:=]\\s*(\\d{1,5})", Pattern.CASE_INSENSITIVE);
     private static final Pattern TOML_MOD_ID = Pattern.compile("(?m)^\\s*modId\\s*=\\s*[\"']([^\"']+)[\"']");
-    private static final String UI_BUNDLE_VERSION = "1.92.0-2";
+    private static final String UI_BUNDLE_VERSION = "webview-1";
     private static final long UI_READY_TIMEOUT_MS = 60000L;
     private static final long UI_HEARTBEAT_TIMEOUT_MS = 60000L;
     private static volatile ProgressReporter progressReporter = ProgressReporter.NONE;
     private static volatile boolean skippedGlobalRestoreHookRegistered;
+    private static volatile JsonObject blockedServersCache;
+    private static volatile long blockedServersCacheExpiresAt;
 
     private ImpulseStandaloneBootstrap() {
     }
@@ -124,10 +129,11 @@ public final class ImpulseStandaloneBootstrap {
             command.add(requestFile.getAbsolutePath());
 
             System.out.println("[Impulse] Opening standalone profile selector. Log: " + logFile);
-            process = new ProcessBuilder(command)
+            ProcessBuilder processBuilder = new ProcessBuilder(command)
+                .directory(bundle.rootDirectory)
                 .redirectErrorStream(true)
-                .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
-                .start();
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile));
+            process = processBuilder.start();
 
             File ready = new File(sessionDirectory, "ready");
             File heartbeat = new File(sessionDirectory, "heartbeat");
@@ -153,30 +159,26 @@ public final class ImpulseStandaloneBootstrap {
                 }
                 if (!process.isAlive()) {
                     System.err.println("[Impulse] Standalone selector exited before selecting a profile.");
-                    markSetupRequired();
-                    return UiOutcome.FALLBACK;
+                    return nativeUiFailureOutcome(gameDirectory);
                 }
                 long now = System.currentTimeMillis();
                 if (readyAt == 0L && ready.isFile()) readyAt = now;
                 if (readyAt == 0L && now - started > UI_READY_TIMEOUT_MS) {
                     System.err.println("[Impulse] Standalone selector did not create a window within 60 seconds.");
-                    markSetupRequired();
-                    return UiOutcome.FALLBACK;
+                    return nativeUiFailureOutcome(gameDirectory);
                 }
                 if (readyAt > 0L) {
                     long heartbeatAt = heartbeat.isFile() ? heartbeat.lastModified() : readyAt;
                     if (now - heartbeatAt > UI_HEARTBEAT_TIMEOUT_MS) {
                         System.err.println("[Impulse] Standalone selector stopped responding.");
-                        markSetupRequired();
-                        return UiOutcome.FALLBACK;
+                        return nativeUiFailureOutcome(gameDirectory);
                     }
                 }
                 Thread.sleep(200L);
             }
         } catch (Throwable error) {
             System.err.println("[Impulse] Standalone selector failed: " + error.getMessage());
-            markSetupRequired();
-            return UiOutcome.FALLBACK;
+            return nativeUiFailureOutcome(gameDirectory);
         } finally {
             if (process != null && process.isAlive()) process.destroyForcibly();
             if (sessionDirectory != null) deleteTree(sessionDirectory);
@@ -188,6 +190,31 @@ public final class ImpulseStandaloneBootstrap {
         System.setProperty("impulse.standalone.setup_required", "true");
         System.clearProperty("impulse.standalone");
         System.clearProperty("impulse.standalone.profile_id");
+    }
+
+    private static UiOutcome nativeUiFailureOutcome(File gameDirectory) {
+        if (!hasAcceptedStandaloneLegal(gameDirectory)) {
+            System.err.println("[Impulse] The standalone legal documents have not been accepted; Minecraft will close.");
+            return UiOutcome.QUIT;
+        }
+        markSetupRequired();
+        return UiOutcome.FALLBACK;
+    }
+
+    private static boolean hasAcceptedStandaloneLegal(File gameDirectory) {
+        File file = new File(new File(new File(gameDirectory, "impulse"), "standalone"), "legal.json");
+        if (!file.isFile()) return false;
+        FileInputStream input = null;
+        try {
+            input = new FileInputStream(file);
+            JsonElement parsed = new JsonParser().parse(readAll(input, 64 * 1024));
+            return parsed.isJsonObject() && parsed.getAsJsonObject().has("version")
+                && LEGAL_DOCUMENT_VERSION.equals(parsed.getAsJsonObject().get("version").getAsString());
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            closeQuietly(input);
+        }
     }
 
     private static UiResult readUiResult(File file) {
@@ -261,7 +288,19 @@ public final class ImpulseStandaloneBootstrap {
             classpath.append(jar.getAbsolutePath());
         }
         if (!hasHelper) throw new IOException("The embedded Impulse selector is missing.");
-        return new UiBundle(classpath.toString(), new File(uiRoot, "assets"));
+        cleanupOldUiBundles(uiRoot);
+        return new UiBundle(classpath.toString(), new File(uiRoot, "assets"), uiRoot);
+    }
+
+    private static void cleanupOldUiBundles(File activeRoot) {
+        File parent = activeRoot.getParentFile();
+        File[] entries = parent == null ? null : parent.listFiles();
+        if (entries == null) return;
+        for (File entry : entries) {
+            if (!entry.isDirectory() || entry.equals(activeRoot) || "sessions".equals(entry.getName()) || "cache".equals(entry.getName())) continue;
+            try { deleteTree(entry); }
+            catch (Throwable error) { System.err.println("[Impulse] Could not remove old standalone UI bundle " + entry.getName() + ": " + error.getMessage()); }
+        }
     }
 
     private static void collectJars(File directory, List<File> output) {
@@ -378,8 +417,19 @@ public final class ImpulseStandaloneBootstrap {
         return discover(input, null);
     }
 
+    public static RestrictedServerException serverRestriction(String input) throws IOException {
+        Address address = parseAddress(input);
+        try {
+            assertServerAllowed(address.host);
+            return null;
+        } catch (RestrictedServerException restricted) {
+            return restricted;
+        }
+    }
+
     private static Discovery discover(String input, String expectedPublicKey) throws IOException {
         Address address = parseAddress(input);
+        assertServerAllowed(address.host);
         JsonObject status = ping(address.host, address.port);
         int manifestPort = extractManifestPort(status);
         if (manifestPort <= 0) manifestPort = DEFAULT_MANIFEST_PORT;
@@ -400,6 +450,78 @@ public final class ImpulseStandaloneBootstrap {
         }
         int minecraftPort = manifest.server != null && validPort(manifest.server.port) ? manifest.server.port : address.port;
         return new Discovery(address.host, minecraftPort, manifestPort, manifestUrl.toString(), raw, manifest, manifestPublicKey);
+    }
+
+    private static String normalizeSecurityHost(String value) {
+        String host = clean(value, "").toLowerCase(Locale.ROOT);
+        if (host.startsWith("[") && host.endsWith("]")) host = host.substring(1, host.length() - 1);
+        while (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+        return host;
+    }
+
+    private static synchronized JsonObject blockedServerRegistry() {
+        if (blockedServersCache != null && blockedServersCacheExpiresAt > System.currentTimeMillis()) return blockedServersCache;
+        try {
+            HttpPayload payload = readPayload(new URL(BLOCKED_SERVERS_URL), 1024 * 1024, 5000, 10000);
+            JsonObject parsed = new JsonParser().parse(new String(payload.body, StandardCharsets.UTF_8)).getAsJsonObject();
+            if (!parsed.has("servers") || !parsed.get("servers").isJsonArray()) throw new IOException("Invalid blocked server registry.");
+            blockedServersCache = parsed;
+            blockedServersCacheExpiresAt = System.currentTimeMillis() + 5 * 60 * 1000L;
+            return parsed;
+        } catch (Exception error) {
+            System.err.println("[Impulse security] Server blacklist unavailable: " + error.getMessage());
+            return blockedServersCache == null ? new JsonObject() : blockedServersCache;
+        }
+    }
+
+    private static void assertServerAllowed(String host) throws IOException {
+        String normalizedHost = normalizeSecurityHost(host);
+        JsonObject registry = blockedServerRegistry();
+        if (!registry.has("servers") || !registry.get("servers").isJsonArray()) return;
+        Set<String> resolved = new HashSet<String>();
+        resolved.add(normalizedHost);
+        try {
+            for (InetAddress address : InetAddress.getAllByName(normalizedHost)) {
+                String candidate = normalizeSecurityHost(address.getHostAddress());
+                if (candidate.indexOf(':') < 0) resolved.add(candidate);
+            }
+        } catch (Exception error) {
+            System.err.println("[Impulse security] Could not resolve " + normalizedHost + " for blacklist check: " + error.getMessage());
+        }
+        for (JsonElement element : registry.getAsJsonArray("servers")) {
+            if (!element.isJsonObject()) continue;
+            JsonObject entry = element.getAsJsonObject();
+            String blockedHost = entry.has("host") ? normalizeSecurityHost(entry.get("host").getAsString()) : "";
+            boolean blocked = normalizedHost.equals(blockedHost);
+            if (!blocked && entry.has("ipv4") && entry.get("ipv4").isJsonArray()) {
+                for (JsonElement address : entry.getAsJsonArray("ipv4")) {
+                    if (address.isJsonPrimitive() && resolved.contains(normalizeSecurityHost(address.getAsString()))) {
+                        blocked = true;
+                        break;
+                    }
+                }
+            }
+            if (blocked) {
+                String code = entry.has("reason_code") ? clean(entry.get("reason_code").getAsString(), "") : "";
+                String[] reason = serverRestrictionReason(code);
+                throw new RestrictedServerException(normalizedHost, code, reason[0], reason[1]);
+            }
+        }
+    }
+
+    private static String[] serverRestrictionReason(String value) {
+        String code = clean(value, "").toLowerCase(Locale.ROOT);
+        if ("malware".equals(code)) return new String[] { "Malicious software detected", "This server has distributed files identified as malicious or harmful." };
+        if ("credential_theft".equals(code)) return new String[] { "Credential theft risk", "This server has attempted to collect passwords, session tokens, account credentials, or other sensitive information." };
+        if ("phishing_impersonation".equals(code)) return new String[] { "Phishing or impersonation", "This server has impersonated another service, project, or community in a way that could mislead players." };
+        if ("compromised_server".equals(code)) return new String[] { "Server infrastructure compromised", "This server appears to be compromised and may distribute unauthorized files or content." };
+        if ("unsafe_mod_distribution".equals(code)) return new String[] { "Unsafe mod distribution", "This server has distributed deceptive, tampered, or unauthorized mod files." };
+        if ("fraud".equals(code)) return new String[] { "Fraudulent activity", "This server has been associated with scams, fraudulent transactions, or intentionally misleading offers." };
+        if ("illegal_distribution".equals(code)) return new String[] { "Unauthorized content distribution", "This server has repeatedly distributed software or content without the required authorization." };
+        if ("abusive_content".equals(code)) return new String[] { "Severe abusive activity", "This server has been restricted because of severe abuse that presents a risk to Impulse users." };
+        if ("repeated_security_incidents".equals(code)) return new String[] { "Repeated security incidents", "This server has continued unsafe behavior after previous security incidents." };
+        if ("policy_violation".equals(code)) return new String[] { "Impulse security policy violation", "This server has violated Impulse security requirements in a way that may put players at risk." };
+        return new String[] { "Security restriction", "Impulse has restricted access to this server because it may present a risk to players." };
     }
 
     public static synchronized Store loadStore(File gameDirectory) {
@@ -1707,10 +1829,12 @@ public final class ImpulseStandaloneBootstrap {
     private static final class UiBundle {
         final String classpath;
         final File assetsDirectory;
+        final File rootDirectory;
 
-        UiBundle(String classpath, File assetsDirectory) {
+        UiBundle(String classpath, File assetsDirectory, File rootDirectory) {
             this.classpath = classpath;
             this.assetsDirectory = assetsDirectory;
+            this.rootDirectory = rootDirectory;
         }
     }
 
@@ -1789,6 +1913,9 @@ public final class ImpulseStandaloneBootstrap {
         public int manifest_version;
         public String name;
         public String description;
+        public String icon_url;
+        public String banner_url;
+        public String video_background_url;
         public ServerInfo server;
         public MinecraftInfo minecraft;
         public List<ManifestMod> mods = new ArrayList<ManifestMod>();
@@ -1869,6 +1996,21 @@ public final class ImpulseStandaloneBootstrap {
             long total = 0L;
             for (ManifestMod mod : safeMods(manifest)) total += Math.max(0L, mod.size);
             return total;
+        }
+    }
+
+    public static final class RestrictedServerException extends IOException {
+        public final String host;
+        public final String reasonCode;
+        public final String title;
+        public final String description;
+
+        private RestrictedServerException(String host, String reasonCode, String title, String description) {
+            super(SERVER_ACCESS_RESTRICTED_HEADING + ". " + title + ": " + description);
+            this.host = clean(host, "Unknown server");
+            this.reasonCode = clean(reasonCode, "policy_violation");
+            this.title = clean(title, "Security restriction");
+            this.description = clean(description, "Impulse has restricted access to this server because it may present a risk to players.");
         }
     }
 

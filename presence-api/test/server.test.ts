@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { createPresenceServer, minecraftOfflineUuid } from '../src/server.js';
+import { BLOCKED_SERVER_REASON_CODES, createPresenceServer, minecraftOfflineUuid, sanitizeBlockedServerRegistry } from '../src/server.js';
 const registry = JSON.parse(readFileSync(new URL('../data/recognized-mods.json', import.meta.url), 'utf8'));
+const blockedServers = JSON.parse(readFileSync(new URL('../data/blocked-servers.json', import.meta.url), 'utf8'));
 
 const SECRET = 'test-secret-that-is-definitely-longer-than-thirty-two-characters';
 const UUID = '39d9ec7970394f039078ad79e84ff976';
@@ -332,4 +333,30 @@ test('serves the recognized mod registry with an ETag', async () => {
   const cached = await app.inject({ method: 'GET', url: '/v1/mod-verification/recognized-mods', headers: { 'if-none-match': String(response.headers.etag) } });
   assert.equal(cached.statusCode, 304);
   await app.close();
+});
+
+test('serves the blocked server registry with an ETag', async () => {
+  const app = await createPresenceServer({ secret: SECRET, logger: false });
+  const response = await app.inject({ method: 'GET', url: '/v1/security/blocked-servers' });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), blockedServers);
+  assert.ok(response.headers.etag);
+  const cached = await app.inject({ method: 'GET', url: '/v1/security/blocked-servers', headers: { 'if-none-match': String(response.headers.etag) } });
+  assert.equal(cached.statusCode, 304);
+  await app.close();
+});
+
+test('accepts every blocked-server preset and migrates invalid reasons safely', () => {
+  const presets = [...BLOCKED_SERVER_REASON_CODES];
+  const sanitized = sanitizeBlockedServerRegistry({
+    servers: [
+      ...presets.map((reason_code, index) => ({ host: `server-${index}.example.com`, ipv4: [`192.0.2.${index + 1}`], reason_code })),
+      { host: 'legacy.example.com', ipv4: ['198.51.100.2'], reason: 'free-form legacy text' },
+      { host: 'future.example.com', ipv4: ['203.0.113.5'], reason_code: 'future_reason' },
+    ],
+  });
+  assert.deepEqual(new Set(sanitized.servers.slice(0, presets.length + 2).map((entry) => entry.reason_code)), new Set([...presets, 'policy_violation']));
+  assert.equal(sanitized.servers.find((entry) => entry.host === 'legacy.example.com')?.reason_code, 'policy_violation');
+  assert.equal(sanitized.servers.find((entry) => entry.host === 'future.example.com')?.reason_code, 'policy_violation');
+  assert.equal(JSON.stringify(sanitized).includes('free-form legacy text'), false);
 });

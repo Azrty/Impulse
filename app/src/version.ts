@@ -1,1 +1,1 @@
-export const IMPULSE_MOD_VERSION = '1.2.0-beta.2';
+export const IMPULSE_MOD_VERSION = '1.2.0';

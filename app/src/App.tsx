@@ -34,6 +34,57 @@ type UpdateStatus = {
   percent?: number;
 };
 
+type ServerRestrictionDetails = {
+  restrictionKind: 'server-security';
+  title: string;
+  reasonTitle: string;
+  description: string;
+  reasonCode?: string;
+};
+
+function serverRestrictionDetails(value: unknown): ServerRestrictionDetails | null {
+  if (!value || typeof value !== 'object') return null;
+  const details = value as Record<string, unknown>;
+  if (details.restrictionKind !== 'server-security') return null;
+  return {
+    restrictionKind: 'server-security',
+    title: String(details.title || 'Access to this server has been restricted by Impulse'),
+    reasonTitle: String(details.reasonTitle || 'Security restriction'),
+    description: String(details.description || 'Impulse has restricted access to this server because it may present a risk to players.'),
+    reasonCode: typeof details.reasonCode === 'string' ? details.reasonCode : undefined
+  };
+}
+
+function ServerRestrictionScreen({ details, address, onBack, onRemove }: {
+  details: ServerRestrictionDetails;
+  address?: string;
+  onBack: () => void;
+  onRemove?: () => void;
+}) {
+  return (
+    <div className="relative flex h-full min-h-[520px] items-center justify-center overflow-hidden bg-black px-6 py-12">
+      <div className="pointer-events-none absolute inset-0 opacity-35 [background-image:linear-gradient(rgba(255,255,255,.035)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,.035)_1px,transparent_1px)] [background-size:34px_34px]" />
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/30" />
+      <section className="relative w-full max-w-2xl text-center">
+        <div className="mx-auto grid h-24 w-24 place-items-center border border-white/20 bg-white/[0.04] shadow-[0_0_80px_rgba(255,255,255,.08)]">
+          <LockKeyhole size={42} strokeWidth={1.35} />
+        </div>
+        <p className="mt-8 text-xs font-semibold uppercase tracking-[0.22em] text-white/45">Impulse Security</p>
+        <h1 className="mx-auto mt-4 max-w-xl text-3xl font-semibold leading-tight text-white">{details.title}</h1>
+        <div className="mx-auto mt-8 max-w-xl border-y border-white/10 py-6">
+          <h2 className="text-lg font-semibold text-white">{details.reasonTitle}</h2>
+          <p className="mx-auto mt-2 max-w-lg text-sm leading-6 text-white/55">{details.description}</p>
+        </div>
+        {address && <p className="mt-5 font-mono text-xs text-white/30">Restricted address: {address}</p>}
+        <div className="mt-8 flex justify-center gap-3">
+          <button onClick={onBack} className="h-11 min-w-28 border border-white/15 px-5 text-sm transition hover:border-white/35 hover:bg-white/10">Back</button>
+          {onRemove && <button onClick={onRemove} className="h-11 min-w-36 bg-white px-5 text-sm font-semibold text-black transition hover:bg-white/85">Remove server</button>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 const defaultDiscordRpcSettings: DiscordRpcSettings = {
   enabled: true,
   clientId: '1531038946409320539',
@@ -646,6 +697,7 @@ function AddServerModal({
   const [address, setAddress] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [restriction, setRestriction] = useState<ServerRestrictionDetails | null>(null);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -659,7 +711,9 @@ function AddServerModal({
         onAdded(result.servers, result.server.id);
         onClose();
       } else {
-        setError(result?.error || 'Unable to add server.');
+        const blocked = serverRestrictionDetails(result?.details);
+        if (blocked) setRestriction(blocked);
+        else setError(result?.error || 'Unable to add server.');
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to add server.');
@@ -670,6 +724,11 @@ function AddServerModal({
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/80 px-5">
+      {restriction ? (
+        <div className="h-[min(720px,calc(100vh-40px))] w-full max-w-5xl border border-white/15 shadow-2xl">
+          <ServerRestrictionScreen details={restriction} address={address} onBack={() => setRestriction(null)} />
+        </div>
+      ) : (
       <form onSubmit={submit} className="w-full max-w-md border border-white/15 bg-[#050505] p-5 shadow-2xl">
         <div className="mb-5 flex items-center justify-between">
           <div>
@@ -692,6 +751,7 @@ function AddServerModal({
           {loading ? 'Discovering...' : 'Add Server'}
         </button>
       </form>
+      )}
     </div>
   );
 }
@@ -1088,7 +1148,9 @@ function ServerDetail({
   onVerify,
   onMarkAnnouncementsRead,
   onCrashSharingChange,
-  onOptionalChange
+  onOptionalChange,
+  restriction,
+  onBack
 }: {
   server: SavedServer | null;
   progress: LaunchProgress | null;
@@ -1103,6 +1165,8 @@ function ServerDetail({
   onMarkAnnouncementsRead: (ids: string[]) => void;
   onCrashSharingChange: (serverId: string, preference: 'ask' | 'always' | 'never') => void;
   onOptionalChange: (serverId: string, selections: Record<string, boolean>) => void;
+  restriction: ServerRestrictionDetails | null;
+  onBack: () => void;
 }) {
   const [view, setView] = useState<'overview' | 'mods' | 'news'>('overview');
   const [now, setNow] = useState(Date.now());
@@ -1127,6 +1191,10 @@ function ServerDetail({
         </div>
       </div>
     );
+  }
+
+  if (restriction) {
+    return <ServerRestrictionScreen details={restriction} address={`${server.host}:${server.port}`} onBack={onBack} onRemove={onRemove} />;
   }
 
   const manifest = server.manifest;
@@ -1717,6 +1785,7 @@ export default function App() {
   const [unsignedManifestPromptServer, setUnsignedManifestPromptServer] = useState<SavedServer | null>(null);
   const [modVerificationPromptServer, setModVerificationPromptServer] = useState<SavedServer | null>(null);
   const [invitationPreview, setInvitationPreview] = useState<{ loading: boolean; error?: string; invitation?: ImpulseInvitation; server?: SavedServer } | null>(null);
+  const [serverRestrictions, setServerRestrictions] = useState<Record<string, ServerRestrictionDetails>>({});
 
   useEffect(() => {
     if (!window.api) {
@@ -1770,6 +1839,14 @@ export default function App() {
             setServers((current) => current.map((entry) => (
               entry.id === result.server?.id ? result.server : entry
             )));
+            setServerRestrictions((current) => {
+              const next = { ...current };
+              delete next[server.id];
+              return next;
+            });
+          } else if (!cancelled) {
+            const blocked = serverRestrictionDetails(result?.details);
+            if (blocked) setServerRestrictions((current) => ({ ...current, [server.id]: blocked }));
           }
         } catch {
           // Startup refresh is best-effort; keep the saved server visible.
@@ -1792,7 +1869,12 @@ export default function App() {
         setCrashReport(null);
       }),
       window.api?.onLaunchError((data) => {
-        if (data.error === 'The server is offline') {
+        const blocked = serverRestrictionDetails(data.details);
+        if (blocked && data.serverId) {
+          setServerRestrictions((current) => ({ ...current, [data.serverId]: blocked }));
+          setProgress({ status: 'server-restricted', message: blocked.title, progress: 0, total: 100, details: data.details });
+          setLaunchError(null);
+        } else if (data.error === 'The server is offline') {
           setProgress({ status: 'server-offline', message: 'The server is offline', progress: 0, total: 100, details: data.details });
           setLaunchError(null);
         } else {
@@ -1832,7 +1914,8 @@ export default function App() {
     [servers, selectedId]
   );
   const selectedServerIsLaunching = !!selectedServer && launchingId === selectedServer.id;
-  const selectedProgress = selectedServer && (selectedServerIsLaunching || progress?.status === 'server-offline') ? progress : null;
+  const selectedProgress = selectedServer && (selectedServerIsLaunching || progress?.status === 'server-offline' || progress?.status === 'server-restricted') ? progress : null;
+  const selectedRestriction = selectedServer ? serverRestrictions[selectedServer.id] || serverRestrictionDetails(selectedProgress?.details) : null;
 
   const removeSelected = async () => {
     if (!selectedServer) return;
@@ -1840,6 +1923,11 @@ export default function App() {
     if (result?.success && result.servers) {
       setServers(result.servers);
       setSelectedId(result.servers[0]?.id || null);
+      setServerRestrictions((current) => {
+        const next = { ...current };
+        delete next[selectedServer.id];
+        return next;
+      });
     }
   };
 
@@ -1895,7 +1983,12 @@ export default function App() {
         setModVerificationPromptServer(result.server);
         return;
       }
-      if (result?.error === 'The server is offline') {
+      const blocked = serverRestrictionDetails(result?.details);
+      if (blocked) {
+        setServerRestrictions((current) => ({ ...current, [serverId]: blocked }));
+        setProgress({ status: 'server-restricted', message: blocked.title, progress: 0, total: 100, details: result.details });
+        setLaunchError(null);
+      } else if (result?.error === 'The server is offline') {
         setProgress({ status: 'server-offline', message: 'The server is offline', progress: 0, total: 100, details: result.details });
         setLaunchError(null);
       } else {
@@ -1923,11 +2016,23 @@ export default function App() {
       return;
     }
     if (!refreshResult?.success) {
-      setProgress(null);
-      setLaunchError(refreshResult?.error || 'Refresh failed.');
+      const blocked = serverRestrictionDetails(refreshResult?.details);
+      if (blocked) {
+        setServerRestrictions((current) => ({ ...current, [serverId]: blocked }));
+        setProgress({ status: 'server-restricted', message: blocked.title, progress: 0, total: 100, details: refreshResult.details });
+        setLaunchError(null);
+      } else {
+        setProgress(null);
+        setLaunchError(refreshResult?.error || 'Refresh failed.');
+      }
       setLaunchingId(null);
       return;
     }
+    setServerRestrictions((current) => {
+      const next = { ...current };
+      delete next[serverId];
+      return next;
+    });
     if (refreshResult.servers) setServers(refreshResult.servers);
     const refreshedServer = refreshResult.server || refreshResult.servers?.find((server) => server.id === serverId) || null;
     if (refreshedServer?.status?.online === false) {
@@ -2149,6 +2254,8 @@ export default function App() {
               }}
               onCrashSharingChange={(serverId, preference) => void updateCrashSharing(serverId, preference)}
               onOptionalChange={updateOptionalMods}
+              restriction={selectedRestriction}
+              onBack={() => setSelectedId(null)}
             />
           </main>
           {showAdd && (

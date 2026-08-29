@@ -1,16 +1,12 @@
 Impulse standalone selector includes the following components:
 
-imgui-java
-Copyright (c) Ilya Prymshyts and contributors
+webview and webview_java
+Copyright (c) 2017 Serge Zaitsev and contributors
 Licensed under the MIT License.
-https://github.com/SpaiR/imgui-java
+https://github.com/webview/webview
+https://github.com/webview/webview_java
 
-Dear ImGui
-Copyright (c) 2014-2026 Omar Cornut
+React
+Copyright (c) Meta Platforms, Inc. and affiliates
 Licensed under the MIT License.
-https://github.com/ocornut/imgui
-
-LWJGL
-Copyright (c) 2012-present Lightweight Java Game Library contributors
-Licensed under the BSD 3-Clause License.
-https://www.lwjgl.org/
+https://react.dev/

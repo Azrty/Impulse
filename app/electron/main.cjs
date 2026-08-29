@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs').promises;
 const net = require('net');
+const dns = require('dns').promises;
 const http = require('http');
 const crypto = require('crypto');
 const Store = require('electron-store');
@@ -56,6 +57,7 @@ const UPDATE_FEED_URL = 'https://impulse.epivalent.com';
 const IMPULSE_MOD_INDEX_URL = 'https://impulse.epivalent.com/mods/index.json';
 const IMPULSE_RECOGNIZED_MODS_URL = 'https://api.impulsemc.com/v1/mod-verification/recognized-mods';
 const IMPULSE_CURSEFORGE_VERIFICATION_URL = 'https://api.impulsemc.com/v1/mod-verification/curseforge';
+const IMPULSE_BLOCKED_SERVERS_URL = 'https://api.impulsemc.com/v1/security/blocked-servers';
 const MODRINTH_VERSION_FILES_URL = 'https://api.modrinth.com/v2/version_files';
 const LEGAL_DOCUMENT_VERSION = '2026-08-20.2';
 const PRIVACY_POLICY_URL = 'https://impulsemc.com/privacy/';
@@ -73,6 +75,22 @@ let consentDependentServicesStarted = false;
 let officialImpulseReleasesCache = { expiresAt: 0, releases: [] };
 const modVerificationCache = new Map();
 let recognizedModsCache = { expiresAt: 0, mods: null };
+let blockedServersCache = { expiresAt: 0, servers: null };
+
+const SERVER_ACCESS_RESTRICTED_HEADING = 'Access to this server has been restricted by Impulse';
+const SERVER_RESTRICTION_REASONS = {
+  malware: ['Malicious software detected', 'This server has distributed files identified as malicious or harmful.'],
+  credential_theft: ['Credential theft risk', 'This server has attempted to collect passwords, session tokens, account credentials, or other sensitive information.'],
+  phishing_impersonation: ['Phishing or impersonation', 'This server has impersonated another service, project, or community in a way that could mislead players.'],
+  compromised_server: ['Server infrastructure compromised', 'This server appears to be compromised and may distribute unauthorized files or content.'],
+  unsafe_mod_distribution: ['Unsafe mod distribution', 'This server has distributed deceptive, tampered, or unauthorized mod files.'],
+  fraud: ['Fraudulent activity', 'This server has been associated with scams, fraudulent transactions, or intentionally misleading offers.'],
+  illegal_distribution: ['Unauthorized content distribution', 'This server has repeatedly distributed software or content without the required authorization.'],
+  abusive_content: ['Severe abusive activity', 'This server has been restricted because of severe abuse that presents a risk to Impulse users.'],
+  repeated_security_incidents: ['Repeated security incidents', 'This server has continued unsafe behavior after previous security incidents.'],
+  policy_violation: ['Impulse security policy violation', 'This server has violated Impulse security requirements in a way that may put players at risk.']
+};
+const UNKNOWN_SERVER_RESTRICTION = ['Security restriction', 'Impulse has restricted access to this server because it may present a risk to players.'];
 
 function normalizeUpdateChannel(value) {
   return value === 'beta' ? 'beta' : 'stable';
@@ -1371,6 +1389,68 @@ function finalVerificationSignature(mods) {
   return mods.map((mod) => `${mod.sha512}:${mod.verification?.status || 'Verification unavailable'}`).sort().join('|');
 }
 
+function normalizeSecurityHost(value) {
+  return String(value || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+}
+
+async function fetchBlockedServers(timeoutMs = 5000) {
+  if (Array.isArray(blockedServersCache.servers) && blockedServersCache.expiresAt > Date.now()) return blockedServersCache.servers;
+  try {
+    const response = await fetch(IMPULSE_BLOCKED_SERVERS_URL, {
+      signal: AbortSignal.timeout(Math.max(3000, timeoutMs)),
+      cache: 'no-store',
+      headers: { Accept: 'application/json', 'User-Agent': 'ImpulseLauncher/1.2' }
+    });
+    if (!response.ok) throw new Error(`Impulse security registry returned HTTP ${response.status}`);
+    const body = await response.json();
+    const servers = Array.isArray(body?.servers) ? body.servers : [];
+    blockedServersCache = { expiresAt: Date.now() + 5 * 60 * 1000, servers };
+    store.set('blockedServersCache', { expiresAt: Date.now() + 24 * 60 * 60 * 1000, servers });
+    return servers;
+  } catch (error) {
+    const saved = store.get('blockedServersCache');
+    if (Array.isArray(saved?.servers) && Number(saved.expiresAt) > Date.now()) {
+      blockedServersCache = saved;
+      return saved.servers;
+    }
+    console.warn('[Impulse security] Server blacklist unavailable:', error.message || error);
+    return [];
+  }
+}
+
+function restrictedServerError(entry) {
+  const reason = SERVER_RESTRICTION_REASONS[String(entry?.reason_code || '').trim().toLowerCase()] || UNKNOWN_SERVER_RESTRICTION;
+  const error = new Error(`${SERVER_ACCESS_RESTRICTED_HEADING}. ${reason[0]}: ${reason[1]}`);
+  error.code = 'SERVER_ACCESS_RESTRICTED';
+  error.details = {
+    restrictionKind: 'server-security',
+    title: SERVER_ACCESS_RESTRICTED_HEADING,
+    reasonTitle: reason[0],
+    description: reason[1],
+    reasonCode: String(entry?.reason_code || 'policy_violation')
+  };
+  return error;
+}
+
+async function assertServerAllowed(host) {
+  const normalizedHost = normalizeSecurityHost(host);
+  if (!normalizedHost) return;
+  const blocked = await fetchBlockedServers(getNetworkTimeout());
+  if (!blocked.length) return;
+  const exact = blocked.find((entry) => normalizeSecurityHost(entry?.host) === normalizedHost);
+  if (exact) throw restrictedServerError(exact);
+
+  let addresses = [];
+  if (net.isIPv4(normalizedHost)) addresses = [normalizedHost];
+  else {
+    try { addresses = await dns.resolve4(normalizedHost); }
+    catch (error) { console.warn(`[Impulse security] Could not resolve ${normalizedHost} for blacklist check:`, error.message || error); }
+  }
+  const addressSet = new Set(addresses.map(normalizeSecurityHost));
+  const matchingIp = blocked.find((entry) => (entry?.ipv4 || []).some((address) => addressSet.has(normalizeSecurityHost(address))));
+  if (matchingIp) throw restrictedServerError(matchingIp);
+}
+
 async function fetchRecognizedMods(timeoutMs) {
   if (recognizedModsCache.mods && recognizedModsCache.expiresAt > Date.now()) return recognizedModsCache.mods;
   try {
@@ -1949,6 +2029,7 @@ async function refreshActiveMicrosoftAccountIfNeeded() {
 async function discoverServer(input, manifestPort = null, event = null, expectedPublicKey = null) {
   const parsed = parseServerAddress(input);
   const port = Number(parsed.port || 25565);
+  await assertServerAllowed(parsed.host);
   const knownManifestPort = validPort(manifestPort);
   const status = await pingMinecraftServer(parsed.host, port);
   if (!status.online) {
@@ -1996,6 +2077,7 @@ async function discoverServer(input, manifestPort = null, event = null, expected
 }
 
 async function refreshSavedServer(existing, options = {}) {
+  await assertServerAllowed(existing.host);
   const status = await pingMinecraftServer(existing.host, existing.port);
   if (!status.online) {
     const offline = offlineServerEntry(existing, status);
@@ -2643,6 +2725,7 @@ async function prepareServerFiles(event, serverId, options = {}) {
   await ensureDirectories(minecraftPath);
   const server = getServers().find((entry) => entry.id === serverId);
   if (!server) throw new Error('Server not found.');
+  await assertServerAllowed(server.host);
   throwIfLaunchCancelled();
 
   event.sender.send('impulse-launch-progress', { status: 'checking-server', message: 'Refreshing server manifest...', progress: 5, total: 100 });
@@ -3094,20 +3177,24 @@ ipcMain.handle('microsoft-login', async () => {
 ipcMain.handle('impulse-list-servers', async () => getServers());
 
 ipcMain.handle('impulse-add-server', async (_event, payload) => {
-  const servers = getServers();
-  let entry = reconcileOptionalMods(await discoverServer(payload.address, payload.manifestPort || null, null, payload.manifestKey || null), false);
-  const existing = servers.find((server) => server.id === entry.id);
-  if (existing) entry = reconcileOptionalMods({
-    ...entry,
-    optionalModChoices: existing.optionalModChoices || existing.optionalModSelections,
-    optionalModPromptedSignature: existing.optionalModPromptedSignature,
-    readAnnouncementIds: existing.readAnnouncementIds || [],
-    crashReportSharing: normalizeCrashSharingPreference(existing.crashReportSharing),
-    outdatedImpulseWarningDismissed: existing.outdatedImpulseWarningDismissed === true
-  }, false);
-  const next = [entry, ...servers.filter((server) => server.id !== entry.id)];
-  setServers(next);
-  return { success: true, server: entry, servers: next };
+  try {
+    const servers = getServers();
+    let entry = reconcileOptionalMods(await discoverServer(payload.address, payload.manifestPort || null, null, payload.manifestKey || null), false);
+    const existing = servers.find((server) => server.id === entry.id);
+    if (existing) entry = reconcileOptionalMods({
+      ...entry,
+      optionalModChoices: existing.optionalModChoices || existing.optionalModSelections,
+      optionalModPromptedSignature: existing.optionalModPromptedSignature,
+      readAnnouncementIds: existing.readAnnouncementIds || [],
+      crashReportSharing: normalizeCrashSharingPreference(existing.crashReportSharing),
+      outdatedImpulseWarningDismissed: existing.outdatedImpulseWarningDismissed === true
+    }, false);
+    const next = [entry, ...servers.filter((server) => server.id !== entry.id)];
+    setServers(next);
+    return { success: true, server: entry, servers: next };
+  } catch (error) {
+    return { success: false, error: error.message || 'Unable to add server.', details: error.details };
+  }
 });
 
 ipcMain.handle('impulse-preview-invitation', async (_event, raw) => {
@@ -3137,7 +3224,7 @@ ipcMain.handle('impulse-refresh-server', async (_event, serverId) => {
     if (refreshed.status?.online !== false) void retryPendingCrashReports(serverId);
     return { success: true, server: refreshed, servers: next, details: refreshed.offlineDetails };
   } catch (error) {
-    return { success: false, error: error.message || 'Unable to refresh server manifest.' };
+    return { success: false, error: error.message || 'Unable to refresh server manifest.', details: error.details };
   }
 });
 
@@ -3286,7 +3373,7 @@ ipcMain.handle('impulse-launch-server', async (event, serverId) => {
     if (error?.code === 'MOD_VERIFICATION_REQUIRED' && error.server) {
       return { success: false, verificationRequired: true, server: error.server };
     }
-    const details = isServerOfflineError(error) ? (error.offlineDetails || await offlineDetails()) : undefined;
+    const details = isServerOfflineError(error) ? (error.offlineDetails || await offlineDetails()) : error.details;
     event.sender.send('impulse-launch-error', { error: error.message, serverId, details });
     return { success: false, error: error.message, details };
   } finally {
@@ -3308,7 +3395,7 @@ ipcMain.handle('impulse-verify-server-files', async (event, serverId) => {
     const prepared = await prepareServerFiles(event, serverId, { skipFinalPing: false, requireVerificationAcceptance: false });
     return { success: true, report: prepared.report, server: prepared.merged };
   } catch (error) {
-    const details = isServerOfflineError(error) ? (error.offlineDetails || await offlineDetails()) : undefined;
+    const details = isServerOfflineError(error) ? (error.offlineDetails || await offlineDetails()) : error.details;
     return { success: false, error: error.message, details, report: error.repairReport || null };
   } finally {
     if (activeLaunch?.serverId === serverId) activeLaunch = null;
