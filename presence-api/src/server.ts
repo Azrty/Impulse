@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -44,6 +44,7 @@ export type PresenceServerOptions = {
   verifyMojang?: MojangVerifier;
   curseForgeApiKey?: string;
   curseForgeFetch?: typeof fetch;
+  reportsDirectory?: string;
 };
 
 type CurseForgeRequestFile = { sha512: string; fingerprint: number };
@@ -66,6 +67,20 @@ export const BLOCKED_SERVER_REASON_CODES = new Set([
   'repeated_security_incidents',
   'policy_violation',
 ]);
+
+export const SERVER_REPORT_CATEGORIES = new Set([
+  'malicious_files',
+  'credential_theft',
+  'impersonation',
+  'fraud',
+  'abuse',
+  'other_security',
+]);
+
+function cleanReportText(value: unknown, maxLength: number): string {
+  if (typeof value !== 'string') return '';
+  return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, '').trim().slice(0, maxLength);
+}
 
 type BlockedServerEntry = { host: string; ipv4: string[]; reason_code: string };
 
@@ -245,6 +260,7 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   const artwork = new Map<string, ArtworkEntry>();
   const tokenRates = new Map<string, RateBucket>();
   const curseForgeRequests = new Map<string, Promise<Map<number, CurseForgeFile>>>();
+  const reportsDirectory = path.resolve(options.reportsDirectory ?? path.join(process.cwd(), 'reports'));
   const registryPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/recognized-mods.json');
   let recognizedMods: { schema_version: number; mods: Record<string, { name: string }> } = { schema_version: 1, mods: {} };
   try { recognizedMods = JSON.parse(await readFile(registryPath, 'utf8')); } catch (error) { app.log.warn({ error }, 'Unable to read recognized mod registry'); }
@@ -295,6 +311,57 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     max: 120,
     timeWindow: '1 minute',
     keyGenerator: (request) => request.ip,
+  });
+
+  app.post('/v1/security/server-reports', { config: { rateLimit: { max: 5, timeWindow: '24 hours' } } }, async (request, reply) => {
+    const body = request.body as Record<string, unknown> | null;
+    const serverName = cleanReportText(body?.server_name, 128);
+    const serverAddress = cleanReportText(body?.server_address, 320).toLowerCase();
+    const serverHost = cleanReportText(body?.server_host, 253).toLowerCase();
+    const category = cleanReportText(body?.category, 40).toLowerCase();
+    const details = cleanReportText(body?.details, 2000);
+    const minecraftVersion = cleanReportText(body?.minecraft_version, 40);
+    const loader = cleanReportText(body?.loader, 20).toLowerCase();
+    const client = cleanReportText(body?.client, 24).toLowerCase();
+    if (!serverName
+      || serverAddress.length < 3
+      || !serverHost
+      || !SERVER_REPORT_CATEGORIES.has(category)
+      || details.length < 20
+      || !/^\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$/u.test(minecraftVersion)
+      || !['forge', 'neoforge'].includes(loader)
+      || !['standalone', 'launcher'].includes(client)) {
+      return reply.code(400).send({ error: 'The server report is incomplete or invalid.' });
+    }
+
+    const reportId = crypto.randomUUID();
+    const submittedAt = new Date(now()).toISOString();
+    const sourceId = crypto.createHmac('sha256', options.secret).update(request.ip).digest('hex');
+    const report = {
+      schema_version: 1,
+      report_id: reportId,
+      submitted_at: submittedAt,
+      category,
+      details,
+      server: { name: serverName, address: serverAddress, host: serverHost },
+      environment: { minecraft_version: minecraftVersion, loader, client },
+      source_id: sourceId,
+      user_agent: cleanReportText(request.headers['user-agent'], 200),
+    };
+    const fileName = `${submittedAt.replace(/[:.]/gu, '-')}-${reportId}.json`;
+    await mkdir(reportsDirectory, { recursive: true, mode: 0o700 });
+    const target = path.join(reportsDirectory, fileName);
+    const temporary = `${target}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await rename(temporary, target);
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      request.log.error({ error, reportId }, 'Unable to persist server report');
+      return reply.code(500).send({ error: 'The report could not be saved. Please try again later.' });
+    }
+    request.log.info({ reportId, serverHost, category, client }, 'Server report received');
+    return reply.code(201).send({ report_id: reportId, status: 'received' });
   });
 
   app.post('/v1/mod-verification/curseforge', async (request, reply) => {

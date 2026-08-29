@@ -29,7 +29,7 @@ export type Profile = {
   selected_optional_ids?: string[];
 };
 export type Restriction = { heading: string; title: string; description: string; host: string; reason_code: string };
-export type CustomMod = { project_id: string; name?: string; description?: string; version_number?: string; update_version_number?: string; icon_url?: string; location?: string };
+export type CustomMod = { project_id: string; name?: string; description?: string; version_number?: string; update_version_number?: string; icon_url?: string; location?: string; explicit?: boolean; required_by?: string[] };
 export type SearchProject = { project_id: string; slug?: string; title: string; description?: string; author?: string; icon_url?: string; downloads?: number };
 export type Project = SearchProject & { body?: string; authors?: string[]; featured_gallery?: string; gallery?: { url: string; title?: string; description?: string }[]; license_name?: string; categories?: string[] };
 export type Version = { id: string; name?: string; version_number: string; version_type?: string; changelog?: string; date_published?: string; files?: { filename: string; size: number }[] };

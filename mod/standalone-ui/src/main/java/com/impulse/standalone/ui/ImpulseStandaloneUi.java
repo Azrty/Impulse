@@ -177,6 +177,11 @@ public final class ImpulseStandaloneUi {
         if ("start".equals(action)) return startOperation(required(command, "kind"), command);
         if ("operation".equals(action)) return operationMap.get(required(command, "id"));
         if ("image".equals(action)) return image(required(command, "url"));
+        if ("clipboardRead".equals(action)) return clipboardRead();
+        if ("clipboardWrite".equals(action)) {
+            clipboardWrite(string(command, "text"));
+            return true;
+        }
         if ("openExternal".equals(action)) {
             openExternal(required(command, "url"));
             return true;
@@ -243,6 +248,7 @@ public final class ImpulseStandaloneUi {
                 case "add" -> addServer(operation, required(command, "address"));
                 case "refresh" -> refresh(operation, required(command, "profile_id"));
                 case "delete" -> delete(operation, required(command, "profile_id"));
+                case "report" -> reportServer(operation, command);
                 case "optional" -> updateOptional(operation, required(command, "profile_id"), strings(command, "ids"));
                 case "play" -> play(operation, required(command, "profile_id"), bool(command, "accept_unverified"));
                 case "searchMods" -> searchMods(operation, command);
@@ -272,7 +278,7 @@ public final class ImpulseStandaloneUi {
     private void addServer(Operation operation, String address) throws Exception {
         currentRestriction = null;
         operation.update("Contacting " + address, 0, 1);
-        ImpulseStandaloneBootstrap.Discovery discovery = ImpulseStandaloneBootstrap.discover(address);
+        ImpulseStandaloneBootstrap.Discovery discovery = ImpulseStandaloneBootstrap.discoverForSetup(address);
         ImpulseStandaloneBootstrap.validateRuntime(discovery.manifest, request.minecraft_version, request.loader, request.loader_version);
         List<String> defaults = ImpulseStandaloneBootstrap.defaultOptionalIds(discovery.manifest);
         ImpulseStandaloneBootstrap.Profile profile = ImpulseStandaloneBootstrap.saveProfile(gameDirectory, discovery, defaults);
@@ -300,6 +306,61 @@ public final class ImpulseStandaloneUi {
     private void updateOptional(Operation operation, String profileId, List<String> ids) throws Exception {
         ImpulseStandaloneBootstrap.updateOptionalSelection(gameDirectory, profileId, ids);
         operation.result = state();
+    }
+
+    private void reportServer(Operation operation, JsonObject command) throws Exception {
+        ImpulseStandaloneBootstrap.Profile profile = requireProfile(required(command, "profile_id"));
+        String category = required(command, "category");
+        String details = required(command, "details").trim();
+        if (!Set.of("malicious_files", "credential_theft", "impersonation", "fraud", "abuse", "other_security").contains(category)) {
+            throw new IOException("Select a valid report reason.");
+        }
+        if (details.length() < 20 || details.length() > 2000) {
+            throw new IOException("The report description must contain between 20 and 2000 characters.");
+        }
+        operation.update("Submitting report", 0, 1);
+        JsonObject payload = new JsonObject();
+        payload.addProperty("server_name", clean(profile.name, "Minecraft Server"));
+        payload.addProperty("server_address", profile.address);
+        payload.addProperty("server_host", profile.host);
+        payload.addProperty("category", category);
+        payload.addProperty("details", details);
+        payload.addProperty("minecraft_version", request.minecraft_version);
+        payload.addProperty("loader", request.loader);
+        payload.addProperty("client", "standalone");
+
+        String apiBase = System.getProperty("impulse.presence.api", "https://api.impulsemc.com").trim();
+        if (!apiBase.startsWith("https://") && !apiBase.startsWith("http://127.0.0.1") && !apiBase.startsWith("http://localhost")) {
+            throw new IOException("The Impulse report service URL is invalid.");
+        }
+        HttpURLConnection connection = (HttpURLConnection) new URL(apiBase.replaceAll("/+$", "") + "/v1/security/server-reports").openConnection();
+        connection.setRequestMethod("POST");
+        connection.setConnectTimeout(5000);
+        connection.setReadTimeout(10000);
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+        connection.setRequestProperty("User-Agent", "Impulse-Standalone/" + clean(System.getProperty("impulse.version"), "unknown"));
+        byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+        connection.setFixedLengthStreamingMode(body.length);
+        try (java.io.OutputStream output = connection.getOutputStream()) { output.write(body); }
+        int status = connection.getResponseCode();
+        InputStream responseStream = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream();
+        String responseBody = responseStream == null ? "" : new String(readLimited(responseStream, 64 * 1024), StandardCharsets.UTF_8);
+        if (status < 200 || status >= 300) {
+            String message = "Report service returned HTTP " + status + ".";
+            try {
+                JsonObject error = new JsonParser().parse(responseBody).getAsJsonObject();
+                if (error.has("error")) message = error.get("error").getAsString();
+            } catch (Exception ignored) { }
+            throw new IOException(message);
+        }
+        JsonObject response = new JsonParser().parse(responseBody).getAsJsonObject();
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("report_submitted", true);
+        result.put("report_id", response.has("report_id") ? response.get("report_id").getAsString() : "");
+        operation.update("Report submitted", 1, 1);
+        operation.result = result;
     }
 
     private void play(Operation operation, String profileId, boolean acceptUnverified) throws Exception {
@@ -530,6 +591,55 @@ public final class ImpulseStandaloneUi {
         if (os.contains("mac")) new ProcessBuilder("open", uri.toString()).start();
         else if (os.contains("win")) new ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", uri.toString()).start();
         else new ProcessBuilder("xdg-open", uri.toString()).start();
+    }
+
+    private String clipboardRead() throws IOException {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        Process process;
+        if (os.contains("mac")) {
+            process = new ProcessBuilder("pbpaste").start();
+        } else if (os.contains("win")) {
+            process = new ProcessBuilder("powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw").start();
+        } else {
+            try { process = new ProcessBuilder("wl-paste", "--no-newline").start(); }
+            catch (IOException ignored) { process = new ProcessBuilder("xclip", "-selection", "clipboard", "-out").start(); }
+        }
+        byte[] bytes;
+        try (InputStream input = process.getInputStream()) { bytes = readLimited(input, 1024 * 1024); }
+        waitForClipboard(process);
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    private void clipboardWrite(String text) throws IOException {
+        if (text == null) text = "";
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 1024 * 1024) throw new IOException("Clipboard text is too large.");
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        Process process;
+        if (os.contains("mac")) {
+            process = new ProcessBuilder("pbcopy").start();
+        } else if (os.contains("win")) {
+            process = new ProcessBuilder("powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "$value = [Console]::In.ReadToEnd(); Set-Clipboard -Value $value").start();
+        } else {
+            try { process = new ProcessBuilder("wl-copy").start(); }
+            catch (IOException ignored) { process = new ProcessBuilder("xclip", "-selection", "clipboard", "-in").start(); }
+        }
+        try (java.io.OutputStream output = process.getOutputStream()) { output.write(bytes); }
+        waitForClipboard(process);
+    }
+
+    private void waitForClipboard(Process process) throws IOException {
+        try {
+            if (!process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                throw new IOException("The system clipboard did not respond.");
+            }
+            if (process.exitValue() != 0) throw new IOException("The system clipboard is unavailable.");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Clipboard operation interrupted.", error);
+        }
     }
 
     private static void configureWindowsDpi() {

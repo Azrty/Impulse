@@ -21,6 +21,16 @@ dependencies {
 
 def webDirectory = file('web')
 def webDist = file('web/dist')
+def webGeneratedAssets = file('web/src/generated')
+def impulseLogo = file('../../app/assets/icon-mono.png')
+
+tasks.register('prepareWebAssets', Copy) {
+    from impulseLogo
+    into webGeneratedAssets
+    rename { 'impulse-logo.png' }
+    inputs.file impulseLogo
+    outputs.file file('web/src/generated/impulse-logo.png')
+}
 
 tasks.register('installWebDependencies', Exec) {
     workingDir webDirectory
@@ -30,7 +40,7 @@ tasks.register('installWebDependencies', Exec) {
 }
 
 tasks.register('buildWeb', Exec) {
-    dependsOn 'installWebDependencies'
+    dependsOn 'installWebDependencies', 'prepareWebAssets'
     workingDir webDirectory
     inputs.dir(file('web/src'))
     inputs.files(file('web/index.html'), file('web/package.json'), file('web/vite.config.ts'), file('web/tsconfig.json'))

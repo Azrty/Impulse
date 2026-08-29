@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { BLOCKED_SERVER_REASON_CODES, createPresenceServer, minecraftOfflineUuid, sanitizeBlockedServerRegistry } from '../src/server.js';
 const registry = JSON.parse(readFileSync(new URL('../data/recognized-mods.json', import.meta.url), 'utf8'));
@@ -343,6 +345,46 @@ test('serves the blocked server registry with an ETag', async () => {
   assert.ok(response.headers.etag);
   const cached = await app.inject({ method: 'GET', url: '/v1/security/blocked-servers', headers: { 'if-none-match': String(response.headers.etag) } });
   assert.equal(cached.statusCode, 304);
+  await app.close();
+});
+
+test('stores validated server reports atomically without retaining the source IP', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'impulse-server-reports-'));
+  const app = await createPresenceServer({ secret: SECRET, logger: false, reportsDirectory: directory });
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v1/security/server-reports',
+    headers: { 'user-agent': 'Impulse-Standalone/test' },
+    payload: {
+      server_name: 'SMPFun',
+      server_address: 'play.example.com:25565',
+      server_host: 'play.example.com',
+      category: 'malicious_files',
+      details: 'The server distributed an unexpected executable mod file.',
+      minecraft_version: '1.21.1',
+      loader: 'neoforge',
+      client: 'standalone',
+    },
+  });
+  assert.equal(response.statusCode, 201);
+  assert.match(response.json().report_id, /^[0-9a-f-]{36}$/u);
+  const files = readdirSync(directory);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].endsWith('.tmp'), false);
+  const stored = JSON.parse(readFileSync(path.join(directory, files[0]), 'utf8'));
+  assert.equal(stored.server.host, 'play.example.com');
+  assert.equal(stored.category, 'malicious_files');
+  assert.match(stored.source_id, /^[0-9a-f]{64}$/u);
+  assert.equal(JSON.stringify(stored).includes('127.0.0.1'), false);
+  await app.close();
+});
+
+test('rejects incomplete server reports', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'impulse-server-reports-invalid-'));
+  const app = await createPresenceServer({ secret: SECRET, logger: false, reportsDirectory: directory });
+  const response = await app.inject({ method: 'POST', url: '/v1/security/server-reports', payload: { category: 'other_security' } });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(readdirSync(directory), []);
   await app.close();
 });
 

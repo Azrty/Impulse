@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, ArrowLeft, Check, ChevronRight, Download, ExternalLink, FileWarning,
-  Globe2, ImageOff, LoaderCircle, LockKeyhole, MoreHorizontal, Package, Play, Plus,
+  Flag, Globe2, ImageOff, LoaderCircle, LockKeyhole, MoreHorizontal, Package, Play, Plus,
   RefreshCw, Search, Server, Settings2, ShieldCheck, Trash2, Wrench, X,
 } from 'lucide-react';
 import { heartbeat, invoke } from './bridge';
-import type { GlobalMod, InstallPlan, Manifest, Mod, Operation, Profile, Project, SearchProject, State, Version } from './types';
+import impulseLogo from './generated/impulse-logo.png';
+import type { CustomMod, GlobalMod, InstallPlan, Manifest, Mod, Operation, Profile, Project, SearchProject, State, Version } from './types';
 
 type Tab = 'overview' | 'mods';
 type ModView = 'installed' | 'search' | 'project' | 'versions';
@@ -53,6 +54,9 @@ export function App() {
   const [operation, setOperation] = useState<Operation>();
   const [warning, setWarning] = useState<Warning>();
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [notice, setNotice] = useState('');
   const [optionalOpen, setOptionalOpen] = useState(false);
   const [modManagerOpen, setModManagerOpen] = useState(false);
   const pollRef = useRef<number | undefined>(undefined);
@@ -70,6 +74,46 @@ export function App() {
     return () => window.clearInterval(id);
   }, [loadState]);
 
+  useEffect(() => {
+    const edit = async (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (!['c', 'x', 'v'].includes(key)) return;
+      const target = event.target;
+      const editable = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement;
+      if (key === 'v') {
+        if (!editable || target.disabled || target.readOnly) return;
+        event.preventDefault();
+        try {
+          const value = await invoke<string>('clipboardRead');
+          const start = target.selectionStart ?? target.value.length;
+          const end = target.selectionEnd ?? start;
+          target.setRangeText(value, start, end, 'end');
+          target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: value }));
+        } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+        return;
+      }
+      let value = '';
+      if (editable) {
+        const start = target.selectionStart ?? 0;
+        const end = target.selectionEnd ?? start;
+        value = target.value.slice(start, end);
+        if (key === 'x' && value && !target.disabled && !target.readOnly) {
+          target.setRangeText('', start, end, 'start');
+          target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteByCut' }));
+        }
+      } else {
+        value = window.getSelection()?.toString() || '';
+      }
+      if (!value) return;
+      event.preventDefault();
+      try { await invoke('clipboardWrite', { text: value }); }
+      catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    };
+    window.addEventListener('keydown', edit);
+    return () => window.removeEventListener('keydown', edit);
+  }, []);
+
   useEffect(() => { if (pageRef.current) pageRef.current.scrollTop = 0; }, [state?.selected_profile?.id, tab]);
 
   const watchOperation = useCallback((id: string) => {
@@ -81,15 +125,23 @@ export function App() {
         if (next.status === 'running') return;
         if (pollRef.current) window.clearInterval(pollRef.current);
         if (next.status === 'error') {
-          setError(next.error || 'The operation failed.');
           await loadState();
+          setError(next.error || 'The operation failed.');
+          setOperation(next);
           return;
         }
-        const result = next.result as { confirmation_required?: boolean; mods?: Mod[]; signature?: string } | State | undefined;
+        const result = next.result as { confirmation_required?: boolean; mods?: Mod[]; signature?: string; report_submitted?: boolean; report_id?: string } | State | undefined;
         if (result && 'confirmation_required' in result && result.confirmation_required) {
           setWarning({ mods: result.mods || [], signature: result.signature || '' });
+        } else if (result && 'report_submitted' in result && result.report_submitted) {
+          setNotice(`Report submitted${result.report_id ? ` · ${result.report_id}` : ''}`);
+          window.setTimeout(() => setNotice(''), 5000);
         } else if (result && 'profiles' in result) {
           setState(result as State);
+          if (next.kind === 'add') {
+            setAdding(false);
+            setAddress('');
+          }
         } else {
           await loadState();
         }
@@ -127,7 +179,7 @@ export function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark">↝</span><strong>IMPULSE</strong><span>Standalone</span></div>
+        <div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong><span>Standalone</span></div>
         <div className="channel" aria-label="Update channel">
           <span>Updates</span>
           {(['stable', 'beta'] as const).map(channel => <button key={channel} className={state.update_channel === channel ? 'active' : ''} onClick={async () => setState(await invoke<State>('setUpdateChannel', { channel }))}>{channel}</button>)}
@@ -163,7 +215,14 @@ export function App() {
                   <span className="play-fill" style={{ width: busy ? `${Math.max(5, progress * 100)}%` : '0%' }} />
                   <span className="play-content">{busy ? <LoaderCircle className="spin" size={19} /> : <Play size={19} fill="currentColor" />}{busy ? operation?.message : 'Play'}</span>
                 </button>
-                <button className="icon-button" title="Profile actions" onClick={() => setDeleteOpen(true)}><MoreHorizontal size={20} /></button>
+                <div className="profile-actions">
+                  <button className="icon-button" title="Profile actions" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen(value => !value)}><MoreHorizontal size={20} /></button>
+                  {profileMenuOpen && <div className="context-menu">
+                    <button onClick={() => { setProfileMenuOpen(false); setReportOpen(true); }}><Flag size={16} /> Report server</button>
+                    <div />
+                    <button className="destructive" onClick={() => { setProfileMenuOpen(false); setDeleteOpen(true); }}><Trash2 size={16} /> Remove server</button>
+                  </div>}
+                </div>
               </div>
             </>
           )}
@@ -171,8 +230,10 @@ export function App() {
       </main>
 
       {error && <div className="toast error"><AlertTriangle size={18} /><span>{error}</span><button onClick={() => setError('')}><X size={17} /></button></div>}
-      {adding && <AddServer address={address} setAddress={setAddress} busy={busy} onClose={() => setAdding(false)} onAdd={() => { setAdding(false); start('add', { address }); }} />}
+      {notice && <div className="toast success"><Check size={18} /><span>{notice}</span><button onClick={() => setNotice('')}><X size={17} /></button></div>}
+      {adding && <AddServer address={address} setAddress={value => { setAddress(value); if (error) setError(''); }} busy={busy} error={operation?.kind === 'add' ? error : ''} onClose={() => !busy && setAdding(false)} onAdd={() => start('add', { address })} />}
       {deleteOpen && profile && <Confirm title="Remove this server?" text="This removes its managed files and settings. Your global mods are not changed." confirm="Remove server" destructive onClose={() => setDeleteOpen(false)} onConfirm={() => { setDeleteOpen(false); start('delete', { profile_id: profile.id }); }} />}
+      {reportOpen && profile && <ReportServer profile={profile} busy={busy} onClose={() => setReportOpen(false)} onSubmit={(category, details) => { setReportOpen(false); start('report', { profile_id: profile.id, category, details }); }} />}
       {optionalOpen && profile && manifest && <OptionalMods profile={profile} manifest={manifest} onClose={() => setOptionalOpen(false)} onSave={ids => { setOptionalOpen(false); start('optional', { profile_id: profile.id, ids }); }} />}
       {warning && <VerificationWarning warning={warning} onCancel={() => setWarning(undefined)} onContinue={() => { setWarning(undefined); launch(true); }} />}
       {modManagerOpen && profile && <ModManager profile={profile} state={state} start={start} operation={operation} onClose={async () => { setModManagerOpen(false); await loadState(); }} />}
@@ -181,7 +242,7 @@ export function App() {
 }
 
 function Boot({ error }: { error: string }) {
-  return <div className="boot"><div className="boot-logo">IMPULSE</div>{error ? <><AlertTriangle /><strong>Web interface could not start</strong><p>{error}</p></> : <><LoaderCircle className="spin" /><p>Opening your servers...</p></>}</div>;
+  return <div className="boot"><div className="boot-logo"><img src={impulseLogo} alt="Impulse" /><strong>IMPULSE</strong></div>{error ? <><AlertTriangle /><strong>Web interface could not start</strong><p>{error}</p></> : <><LoaderCircle className="spin" /><p>Opening your servers...</p></>}</div>;
 }
 
 function Legal({ state, onAccepted }: { state: State; onAccepted: (state: State) => void }) {
@@ -213,7 +274,7 @@ function Overview({ manifest }: { manifest?: Manifest }) {
 }
 
 function Mods({ manifest, onOptional, onCustom }: { manifest?: Manifest; onOptional: () => void; onCustom: () => void }) {
-  return <div className="mods-view"><div className="section-heading"><div><span className="eyebrow">Profile content</span><h2>Mods</h2><p>Required additions are prepared automatically. Optional and personal additions stay under your control.</p></div><div><button className="secondary" onClick={onOptional}><Settings2 size={16} /> Optional mods</button><button className="primary" onClick={onCustom}><Plus size={16} /> Add custom mods</button></div></div><ModGroup title="Required" mods={manifest?.mods || []} /><ModGroup title="Optional" mods={manifest?.optional_mods || []} /></div>;
+  return <div className="mods-view"><div className="section-heading"><div><span className="eyebrow">Profile content</span><h2>Mods</h2><p>Required additions are prepared automatically. Optional and personal additions stay under your control.</p></div><div className="heading-actions"><button className="secondary" onClick={onOptional}><Settings2 size={16} /> Optional mods</button><button className="primary" onClick={onCustom}><Plus size={16} /> Add custom mods</button></div></div><ModGroup title="Required" mods={manifest?.mods || []} /><ModGroup title="Optional" mods={manifest?.optional_mods || []} /></div>;
 }
 
 function ModGroup({ title, mods }: { title: string; mods: Mod[] }) {
@@ -229,12 +290,28 @@ function Modal({ children, wide = false }: { children: React.ReactNode; wide?: b
   return <div className="modal-backdrop"><div className={`modal ${wide ? 'wide' : ''}`}>{children}</div></div>;
 }
 
-function AddServer({ address, setAddress, busy, onClose, onAdd }: { address: string; setAddress: (value: string) => void; busy: boolean; onClose: () => void; onAdd: () => void }) {
-  return <Modal><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">New profile</span><h2>Add a server</h2><p>Enter the Minecraft server address, then select Check server.</p><label className="field"><span>Server address</span><input autoFocus value={address} onChange={event => setAddress(event.target.value)} placeholder="play.example.com:25565" onKeyDown={event => event.key === 'Enter' && address.trim() && onAdd()} /></label><div className="modal-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={busy || !address.trim()} onClick={onAdd}>Check server <ChevronRight /></button></div></Modal>;
+function AddServer({ address, setAddress, busy, error, onClose, onAdd }: { address: string; setAddress: (value: string) => void; busy: boolean; error: string; onClose: () => void; onAdd: () => void }) {
+  return <Modal><button className="modal-close" disabled={busy} onClick={onClose}><X /></button><span className="eyebrow">New profile</span><h2>Add a server</h2><p>Enter the Minecraft server address. Impulse will verify it before adding it to your profiles.</p><label className="field"><span>Server address</span><input autoFocus disabled={busy} value={address} onChange={event => setAddress(event.target.value)} placeholder="play.example.com:25565" onKeyDown={event => event.key === 'Enter' && !busy && address.trim() && onAdd()} /></label>{error && <div className="inline-error"><AlertTriangle size={16} /><span>{error}</span></div>}<div className="modal-actions"><button className="secondary" disabled={busy} onClick={onClose}>Cancel</button><button className="primary" disabled={busy || !address.trim()} onClick={onAdd}>{busy ? <><LoaderCircle className="spin" /> Adding server...</> : <>Add server <Plus /></>}</button></div></Modal>;
 }
 
 function Confirm({ title, text, confirm, destructive, onClose, onConfirm }: { title: string; text: string; confirm: string; destructive?: boolean; onClose: () => void; onConfirm: () => void }) {
   return <Modal><button className="modal-close" onClick={onClose}><X /></button><h2>{title}</h2><p>{text}</p><div className="modal-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className={destructive ? 'danger' : 'primary'} onClick={onConfirm}>{confirm}</button></div></Modal>;
+}
+
+const REPORT_CATEGORIES = [
+  ['malicious_files', 'Malicious or suspicious files'],
+  ['credential_theft', 'Credential theft or phishing'],
+  ['impersonation', 'Impersonation'],
+  ['fraud', 'Fraud or scam'],
+  ['abuse', 'Severe abusive activity'],
+  ['other_security', 'Other security concern'],
+] as const;
+
+function ReportServer({ profile, busy, onClose, onSubmit }: { profile: Profile; busy: boolean; onClose: () => void; onSubmit: (category: string, details: string) => void }) {
+  const [category, setCategory] = useState<string>(REPORT_CATEGORIES[0][0]);
+  const [details, setDetails] = useState('');
+  const valid = details.trim().length >= 20 && details.trim().length <= 2000;
+  return <Modal><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">Impulse Security</span><h2>Report this server</h2><p>Tell Impulse about a security or safety concern. Reports are reviewed before any restriction is applied.</p><div className="report-target"><Server size={17} /><span><strong>{profile.name || 'Minecraft Server'}</strong><small>{profile.address}</small></span></div><label className="field"><span>Reason</span><select value={category} onChange={event => setCategory(event.target.value)}>{REPORT_CATEGORIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="field"><span>What happened?</span><textarea autoFocus value={details} maxLength={2000} onChange={event => setDetails(event.target.value)} placeholder="Describe what you observed and include enough detail for the report to be reviewed." /><small>{details.trim().length}/2000 · minimum 20 characters</small></label><div className="modal-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={busy || !valid} onClick={() => onSubmit(category, details.trim())}><Flag size={16} /> Submit report</button></div></Modal>;
 }
 
 function OptionalMods({ profile, manifest, onClose, onSave }: { profile: Profile; manifest: Manifest; onClose: () => void; onSave: (ids: string[]) => void }) {
@@ -268,6 +345,7 @@ function ModManager({ profile, state, start, operation, onClose }: { profile: Pr
   const [installLocation, setInstallLocation] = useState<'profile' | 'global'>('profile');
   const [optionalProjects, setOptionalProjects] = useState(new Set<string>());
   const [lightbox, setLightbox] = useState<string>();
+  const [removeTarget, setRemoveTarget] = useState<CustomMod>();
   const lastOperation = useRef('');
 
   useEffect(() => { start('globalMods', { profile_id: profile.id }); }, [profile.id]);
@@ -284,6 +362,8 @@ function ModManager({ profile, state, start, operation, onClose }: { profile: Pr
       const result = operation.result as { mods?: State['custom_mods'] };
       if (result?.mods) setCustomMods(result.mods);
       setInstallPlan(undefined);
+      if (operation.kind === 'removeMod') setView('installed');
+      window.setTimeout(() => start('globalMods', { profile_id: profile.id }), 0);
     }
   }, [operation]);
 
@@ -292,12 +372,13 @@ function ModManager({ profile, state, start, operation, onClose }: { profile: Pr
   const planInstall = (versionId = '') => project && start('planMod', { profile_id: profile.id, project_id: project.project_id, version_id: versionId, channel });
   const install = () => project && start('installMod', { profile_id: profile.id, project_id: project.project_id, version_id: installPlan ? Object.values(installPlan.items)[0]?.version.id : '', channel, location: installLocation, optional_projects: [...optionalProjects] });
   const busy = operation?.status === 'running';
+  const installedProject = project ? customMods.find(mod => mod.project_id === project.project_id) : undefined;
 
-  return <div className="manager-overlay"><div className="manager"><header className="manager-header"><div><button className="icon-button" onClick={view === 'installed' ? onClose : () => setView(view === 'versions' ? 'project' : 'installed')}><ArrowLeft /></button><span><strong>Custom mods</strong><small>{profile.name || profile.address}</small></span></div><button className="icon-button" onClick={onClose}><X /></button></header><div className="manager-toolbar"><div className="searchbox"><Search /><input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && search()} placeholder="Search Modrinth" /><button onClick={search}>Search</button></div><div className="segments">{(['release', 'beta', 'all'] as const).map(item => <button className={channel === item ? 'active' : ''} onClick={() => setChannel(item)} key={item}>{item}</button>)}</div></div><div className="manager-content">{view === 'installed' && <InstalledMods customMods={customMods} globalMods={globalMods} onProject={openProject} start={start} profile={profile} />}{view === 'search' && <SearchResults results={results} onProject={openProject} />}{view === 'project' && project && <ProjectPage project={project} onVersions={() => start('versions', { profile_id: profile.id, project_id: project.project_id, channel })} onInstall={() => planInstall()} onImage={setLightbox} />}{view === 'versions' && <Versions versions={versions} onInstall={id => planInstall(id)} />}</div>{busy && <div className="manager-progress"><LoaderCircle className="spin" /><span>{operation?.message}</span><progress value={operation?.completed || 0} max={operation?.total || 1} /></div>}</div>{lightbox && <div className="lightbox" onClick={() => setLightbox(undefined)}><NativeImage url={lightbox} /><button><X /></button></div>}{installPlan && <InstallConfirmation plan={installPlan} location={installLocation} setLocation={setInstallLocation} optional={optionalProjects} setOptional={setOptionalProjects} onClose={() => setInstallPlan(undefined)} onInstall={install} />}</div>;
+  return <div className="manager-overlay"><div className="manager"><header className="manager-header"><div><button className="icon-button" onClick={view === 'installed' ? onClose : () => setView(view === 'versions' ? 'project' : 'installed')}><ArrowLeft /></button><span><strong>Custom mods</strong><small>{profile.name || profile.address}</small></span></div><button className="icon-button" onClick={onClose}><X /></button></header><div className="manager-toolbar"><div className="searchbox"><Search /><input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && search()} placeholder="Search Modrinth" /><button onClick={search}>Search</button></div><div className="segments">{(['release', 'beta', 'all'] as const).map(item => <button className={channel === item ? 'active' : ''} onClick={() => setChannel(item)} key={item}>{item}</button>)}</div></div><div className="manager-content">{view === 'installed' && <InstalledMods customMods={customMods} globalMods={globalMods} onProject={openProject} start={start} profile={profile} />}{view === 'search' && <SearchResults results={results} onProject={openProject} />}{view === 'project' && project && <ProjectPage project={project} installed={installedProject} onVersions={() => start('versions', { profile_id: profile.id, project_id: project.project_id, channel })} onInstall={() => planInstall()} onRepair={() => start('repairMod', { profile_id: profile.id, project_id: project.project_id })} onRemove={() => installedProject && setRemoveTarget(installedProject)} onImage={setLightbox} />}{view === 'versions' && <Versions versions={versions} onInstall={id => planInstall(id)} />}</div>{busy && <div className="manager-progress"><LoaderCircle className="spin" /><span>{operation?.message}</span><progress value={operation?.completed || 0} max={operation?.total || 1} /></div>}</div>{lightbox && <div className="lightbox" onClick={() => setLightbox(undefined)}><NativeImage url={lightbox} /><button><X /></button></div>}{installPlan && <InstallConfirmation plan={installPlan} location={installLocation} setLocation={setInstallLocation} optional={optionalProjects} setOptional={setOptionalProjects} onClose={() => setInstallPlan(undefined)} onInstall={install} />}{removeTarget && <Confirm title={`Remove ${removeTarget.name || 'this mod'}?`} text={`The managed jar will be removed from ${removeTarget.location === 'global' ? 'the global /mods folder' : 'this profile'}. Dependencies still required by another mod will be kept.`} confirm="Remove mod" destructive onClose={() => setRemoveTarget(undefined)} onConfirm={() => { const projectId = removeTarget.project_id; setRemoveTarget(undefined); start('removeMod', { profile_id: profile.id, project_id: projectId }); }} />}</div>;
 }
 
 function InstalledMods({ customMods, globalMods, onProject, start, profile }: { customMods: State['custom_mods']; globalMods: GlobalMod[]; onProject: (id: string) => void; start: (kind: string, payload?: Record<string, unknown>) => void; profile: Profile }) {
-  const mods = customMods || [];
+  const mods = (customMods || []).filter(mod => mod.location !== 'global');
   return <div className="browser-list"><div className="section-heading compact"><div><span className="eyebrow">This profile</span><h2>Installed custom mods</h2></div><button className="secondary" onClick={() => start('checkUpdates', { profile_id: profile.id })}><RefreshCw /> Check updates</button></div>{mods.length ? mods.map(mod => <button className="browser-row" key={mod.project_id} onClick={() => onProject(mod.project_id)}><NativeImage url={mod.icon_url} className="project-icon" /><span><strong>{mod.name || mod.project_id}</strong><p>{mod.description || `Version ${mod.version_number || 'unknown'}`}</p><small>{mod.location === 'global' ? 'Global /mods' : 'Profile'}{mod.update_version_number ? ` · Update ${mod.update_version_number} available` : ''}</small></span><ChevronRight /></button>) : <div className="empty-inline">No profile-specific custom mods.</div>}<div className="section-heading compact global-heading"><div><span className="eyebrow">Minecraft instance</span><h2>Global /mods</h2></div></div>{globalMods.length ? globalMods.map(mod => <button className={`browser-row ${mod.compatibility === 'incompatible' ? 'incompatible' : ''}`} key={mod.file_name} onClick={() => mod.project_id && onProject(mod.project_id)}><NativeImage url={mod.icon_url} className="project-icon" /><span><strong>{mod.name || mod.file_name}</strong><p>{mod.reason || mod.file_name}</p><small>{mod.version_number || 'Local jar'} · {fmtBytes(mod.size)}</small></span>{mod.project_id && <ChevronRight />}</button>) : <div className="empty-inline">No global mods detected.</div>}</div>;
 }
 
@@ -311,8 +392,8 @@ function SearchResults({ results, onProject }: { results: SearchProject[]; onPro
   return <div className="browser-list"><div className="section-heading compact"><div><span className="eyebrow">Modrinth</span><h2>{results.length} compatible results</h2></div></div>{results.map(item => <button className="browser-row" key={item.project_id} onClick={() => onProject(item.project_id)}><NativeImage url={item.icon_url} className="project-icon" /><span><strong>{item.title}</strong><p>{item.description}</p><small>by {item.author || 'Unknown author'} · {(item.downloads || 0).toLocaleString()} downloads</small></span><ChevronRight /></button>)}</div>;
 }
 
-function ProjectPage({ project, onVersions, onInstall, onImage }: { project: Project; onVersions: () => void; onInstall: () => void; onImage: (url: string) => void }) {
-  return <article className="project-page"><header><NativeImage url={project.icon_url} className="project-large-icon" /><div><span className="eyebrow">{project.authors?.join(', ') || project.author || 'Modrinth project'}</span><h1>{project.title}</h1><p>{project.description}</p><div className="project-facts"><span>{(project.downloads || 0).toLocaleString()} downloads</span>{project.license_name && <span>{project.license_name}</span>}</div></div><div className="project-actions"><button className="primary" onClick={onInstall}><Download /> Install latest</button><button className="secondary" onClick={onVersions}>Versions</button></div></header>{project.gallery && project.gallery.length > 0 && <div className="gallery">{project.gallery.slice(0, 8).map((image, index) => <button key={image.url} className={index === 0 ? 'featured' : ''} onClick={() => onImage(image.url)}><NativeImage url={image.url} /><span>{image.title}</span></button>)}</div>}<div className="project-body">{(project.body || project.description || '').split(/\n+/).filter(Boolean).map((line, index) => line.startsWith('#') ? <h3 key={index}>{line.replace(/^#+\s*/, '')}</h3> : <p key={index}>{line}</p>)}</div></article>;
+function ProjectPage({ project, installed, onVersions, onInstall, onRepair, onRemove, onImage }: { project: Project; installed?: CustomMod; onVersions: () => void; onInstall: () => void; onRepair: () => void; onRemove: () => void; onImage: (url: string) => void }) {
+  return <article className="project-page"><header><NativeImage url={project.icon_url} className="project-large-icon" /><div><span className="eyebrow">{project.authors?.join(', ') || project.author || 'Modrinth project'}</span><h1>{project.title}</h1><p>{project.description}</p><div className="project-facts"><span>{(project.downloads || 0).toLocaleString()} downloads</span>{project.license_name && <span>{project.license_name}</span>}{installed && <span>Installed in {installed.location === 'global' ? 'Global /mods' : 'this profile'}</span>}</div></div><div className="project-actions">{installed ? <><button className="primary" onClick={onInstall}><Download /> {installed.update_version_number ? 'Update' : 'Reinstall latest'}</button><button className="secondary" onClick={onRepair}><Wrench /> Repair</button><button className="danger" disabled={installed.explicit === false && !!installed.required_by?.length} title={installed.explicit === false && installed.required_by?.length ? 'This mod is required by another installed mod.' : undefined} onClick={onRemove}><Trash2 /> Remove</button></> : <button className="primary" onClick={onInstall}><Download /> Install latest</button>}<button className="secondary" onClick={onVersions}>Versions</button></div></header>{project.gallery && project.gallery.length > 0 && <div className="gallery">{project.gallery.slice(0, 8).map((image, index) => <button key={image.url} className={index === 0 ? 'featured' : ''} onClick={() => onImage(image.url)}><NativeImage url={image.url} /><span>{image.title}</span></button>)}</div>}<div className="project-body">{(project.body || project.description || '').split(/\n+/).filter(Boolean).map((line, index) => line.startsWith('#') ? <h3 key={index}>{line.replace(/^#+\s*/, '')}</h3> : <p key={index}>{line}</p>)}</div></article>;
 }
 
 function Versions({ versions, onInstall }: { versions: Version[]; onInstall: (id: string) => void }) {

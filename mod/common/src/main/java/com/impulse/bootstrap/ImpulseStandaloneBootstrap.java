@@ -38,6 +38,7 @@ import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Hashtable;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -54,6 +55,10 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.DirContext;
+import javax.naming.directory.InitialDirContext;
 
 /**
  * Loader-neutral standalone bootstrap used before Forge or NeoForge finishes mod discovery.
@@ -414,7 +419,11 @@ public final class ImpulseStandaloneBootstrap {
     }
 
     public static Discovery discover(String input) throws IOException {
-        return discover(input, null);
+        return discover(input, null, true);
+    }
+
+    public static Discovery discoverForSetup(String input) throws IOException {
+        return discover(input, null, false);
     }
 
     public static RestrictedServerException serverRestriction(String input) throws IOException {
@@ -428,13 +437,47 @@ public final class ImpulseStandaloneBootstrap {
     }
 
     private static Discovery discover(String input, String expectedPublicKey) throws IOException {
+        return discover(input, expectedPublicKey, true);
+    }
+
+    private static Discovery discover(String input, String expectedPublicKey, boolean verifyMods) throws IOException {
         Address address = parseAddress(input);
         assertServerAllowed(address.host);
-        JsonObject status = ping(address.host, address.port);
-        int manifestPort = extractManifestPort(status);
-        if (manifestPort <= 0) manifestPort = DEFAULT_MANIFEST_PORT;
-        URL manifestUrl = new URL("http", address.host, manifestPort, "/impulse/server.json");
-        HttpPayload payload = readPayload(manifestUrl, MAX_MANIFEST_BYTES, 5000, 15000);
+        if (!address.connectHost.equalsIgnoreCase(address.host)) assertServerAllowed(address.connectHost);
+        JsonObject status = null;
+        IOException pingError = null;
+        try {
+            status = ping(address.connectHost, address.host, address.port);
+        } catch (IOException error) {
+            pingError = error;
+        }
+        int discoveredPort = status == null ? -1 : extractManifestPort(status);
+        List<Integer> candidatePorts = new ArrayList<Integer>();
+        if (validPort(discoveredPort)) candidatePorts.add(discoveredPort);
+        if (!candidatePorts.contains(DEFAULT_MANIFEST_PORT)) candidatePorts.add(DEFAULT_MANIFEST_PORT);
+
+        URL manifestUrl = null;
+        HttpPayload payload = null;
+        IOException manifestError = null;
+        int manifestPort = DEFAULT_MANIFEST_PORT;
+        for (Integer candidatePort : candidatePorts) {
+            URL candidateUrl = new URL("http", address.connectHost, candidatePort, "/impulse/server.json");
+            try {
+                payload = readPayload(candidateUrl, MAX_MANIFEST_BYTES, 4000, 10000);
+                manifestUrl = candidateUrl;
+                manifestPort = candidatePort;
+                break;
+            } catch (IOException error) {
+                manifestError = error;
+            }
+        }
+        if (payload == null || manifestUrl == null) {
+            StringBuilder message = new StringBuilder("Could not reach the Impulse server information on port ")
+                .append(DEFAULT_MANIFEST_PORT).append('.');
+            if (pingError != null) message.append(" Minecraft status also failed: ").append(clean(pingError.getMessage(), "unreachable server")).append('.');
+            else if (manifestError != null) message.append(' ').append(clean(manifestError.getMessage(), "The manifest endpoint is unavailable."));
+            throw new IOException(message.toString(), manifestError == null ? pingError : manifestError);
+        }
         String manifestPublicKey = verifyManifestPayload(payload, expectedPublicKey);
         String raw = new String(payload.body, StandardCharsets.UTF_8);
         Manifest manifest;
@@ -444,7 +487,7 @@ public final class ImpulseStandaloneBootstrap {
             throw new IOException("The server returned an invalid Impulse manifest: " + error.getMessage(), error);
         }
         normalizeManifest(manifest);
-        verifyManifestModOrigins(manifest);
+        if (verifyMods) verifyManifestModOrigins(manifest);
         if (manifest.minecraft == null || clean(manifest.minecraft.version, "").length() == 0) {
             throw new IOException("The Impulse manifest does not contain a Minecraft version.");
         }
@@ -1212,16 +1255,16 @@ public final class ImpulseStandaloneBootstrap {
         }
     }
 
-    private static JsonObject ping(String host, int port) throws IOException {
+    private static JsonObject ping(String connectHost, String handshakeHost, int port) throws IOException {
         Socket socket = new Socket();
         try {
-            socket.connect(new InetSocketAddress(host, port), 5000);
+            socket.connect(new InetSocketAddress(connectHost, port), 5000);
             socket.setSoTimeout(5000);
             OutputStream output = socket.getOutputStream();
             ByteArrayOutputStream handshakeBody = new ByteArrayOutputStream();
             writeVarInt(handshakeBody, 0);
             writeVarInt(handshakeBody, 47);
-            writeString(handshakeBody, host);
+            writeString(handshakeBody, handshakeHost);
             handshakeBody.write((port >>> 8) & 0xFF);
             handshakeBody.write(port & 0xFF);
             writeVarInt(handshakeBody, 1);
@@ -1240,7 +1283,7 @@ public final class ImpulseStandaloneBootstrap {
             if (!parsed.isJsonObject()) throw new IOException("Minecraft status response is not JSON.");
             return parsed.getAsJsonObject();
         } catch (IOException error) {
-            throw new IOException("Could not reach Minecraft server " + formatAddress(host, port) + ": " + error.getMessage(), error);
+            throw new IOException("Could not reach Minecraft server " + formatAddress(handshakeHost, port) + ": " + error.getMessage(), error);
         } finally {
             try { socket.close(); } catch (Exception ignored) { }
         }
@@ -1290,6 +1333,7 @@ public final class ImpulseStandaloneBootstrap {
         }
         String host;
         int port = DEFAULT_MINECRAFT_PORT;
+        boolean explicitPort = false;
         if (raw.startsWith("[")) {
             int close = raw.indexOf(']');
             if (close < 0) throw new IOException("Invalid bracketed IPv6 address.");
@@ -1297,6 +1341,7 @@ public final class ImpulseStandaloneBootstrap {
             if (close + 1 < raw.length()) {
                 if (raw.charAt(close + 1) != ':') throw new IOException("Invalid Minecraft server address.");
                 port = parsePort(raw.substring(close + 2));
+                explicitPort = true;
             }
         } else {
             int first = raw.indexOf(':');
@@ -1304,13 +1349,57 @@ public final class ImpulseStandaloneBootstrap {
             if (first > 0 && first == last) {
                 host = raw.substring(0, first);
                 port = parsePort(raw.substring(first + 1));
+                explicitPort = true;
             } else {
                 host = raw;
             }
         }
         host = host.trim();
         if (host.length() == 0 || !validPort(port)) throw new IOException("Invalid Minecraft server address or port.");
-        return new Address(host, port);
+        if (!explicitPort && host.indexOf(':') < 0) {
+            Address srv = resolveMinecraftSrv(host);
+            if (srv != null) return srv;
+        }
+        return new Address(host, host, port);
+    }
+
+    private static Address resolveMinecraftSrv(String host) {
+        DirContext context = null;
+        try {
+            Hashtable<String, String> environment = new Hashtable<String, String>();
+            environment.put("java.naming.factory.initial", "com.sun.jndi.dns.DnsContextFactory");
+            environment.put("com.sun.jndi.dns.timeout.initial", "2000");
+            environment.put("com.sun.jndi.dns.timeout.retries", "1");
+            context = new InitialDirContext(environment);
+            Attributes attributes = context.getAttributes("_minecraft._tcp." + host, new String[] { "SRV" });
+            Attribute records = attributes.get("SRV");
+            if (records == null) return null;
+            int bestPriority = Integer.MAX_VALUE;
+            int bestWeight = -1;
+            String bestTarget = null;
+            int bestPort = -1;
+            for (int index = 0; index < records.size(); index++) {
+                String[] parts = String.valueOf(records.get(index)).trim().split("\\s+");
+                if (parts.length != 4) continue;
+                int priority = parsePort(parts[0]);
+                int weight = parsePort(parts[1]);
+                int candidatePort = parsePort(parts[2]);
+                String target = parts[3];
+                while (target.endsWith(".")) target = target.substring(0, target.length() - 1);
+                if (!validPort(candidatePort) || target.length() == 0) continue;
+                if (priority < bestPriority || priority == bestPriority && weight > bestWeight) {
+                    bestPriority = priority;
+                    bestWeight = weight;
+                    bestTarget = target;
+                    bestPort = candidatePort;
+                }
+            }
+            return bestTarget == null ? null : new Address(host, bestTarget, bestPort);
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (context != null) try { context.close(); } catch (Exception ignored) { }
+        }
     }
 
     private static void normalizeManifest(Manifest manifest) {
@@ -2056,7 +2145,8 @@ public final class ImpulseStandaloneBootstrap {
 
     private static final class Address {
         final String host;
+        final String connectHost;
         final int port;
-        Address(String host, int port) { this.host = host; this.port = port; }
+        Address(String host, String connectHost, int port) { this.host = host; this.connectHost = connectHost; this.port = port; }
     }
 }
