@@ -40,13 +40,19 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /** WebView standalone profile selector launched before NeoForge mod discovery. */
 public final class ImpulseStandaloneUi {
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final int MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+    private static final int MAX_FRONTEND_BYTES = 8 * 1024 * 1024;
+    private static final long FRONTEND_READY_TIMEOUT_MS = 60000L;
+    private static final int MAX_UPDATES_BYTES = 1024 * 1024;
     private static final long IMAGE_CACHE_MAX_BYTES = 100L * 1024L * 1024L;
     private static final long IMAGE_CACHE_MAX_AGE = 30L * 24L * 60L * 60L * 1000L;
+    private static final String UPDATES_URL = "https://api.impulsemc.com/v1/standalone/updates";
+    private static final Set<String> UPDATE_ICONS = Set.of("sparkles", "shield-check", "package-plus", "scan-check", "wrench", "rocket", "server", "download");
 
     private final ImpulseStandaloneBootstrap.UiRequest request;
     private final File gameDirectory;
@@ -67,13 +73,17 @@ public final class ImpulseStandaloneUi {
     private volatile boolean legalAccepted;
     private volatile boolean completed;
     private volatile Webview webview;
+    private volatile boolean webviewRunning;
+    private volatile boolean frontendReady;
     private volatile ImpulseStandaloneBootstrap.RestrictedServerException currentRestriction;
+    private volatile UpdateRegistry updateRegistry;
 
     private ImpulseStandaloneUi(ImpulseStandaloneBootstrap.UiRequest request) {
         this.request = request;
         this.gameDirectory = new File(request.game_directory);
         this.sessionDirectory = new File(request.session_directory);
         this.legalAccepted = loadLegalAcceptance();
+        this.updateRegistry = loadCachedUpdates();
         ImpulseStandaloneBootstrap.Store store = ImpulseStandaloneBootstrap.loadStore(gameDirectory);
         this.selectedProfileId = store.active_profile_id;
         if (selectedProfileId == null && store.profiles != null && !store.profiles.isEmpty()) {
@@ -102,17 +112,87 @@ public final class ImpulseStandaloneUi {
         System.out.println("[Impulse UI] Starting WebView profile selector for " + request.loader + " " + request.loader_version);
         cleanupImageCache();
         configureWindowsDpi();
-        Webview window = new Webview(Boolean.getBoolean("impulse.ui.debug"));
-        this.webview = window;
-        window.setTitle("Impulse - Choose a server");
-        window.setMinSize(760, 520);
-        window.setSize(1180, 760);
-        window.bind("impulseBridge", this::bridge);
-        window.loadURL(singleFileDataUrl());
-        window.run();
-        operations.shutdownNow();
-        images.shutdownNow();
+        Webview window = null;
+        try {
+            File frontend = extractFrontend();
+            String frontendUrl = frontend.toURI().toASCIIString();
+            System.out.println("[Impulse UI] WebView backend: " + webviewBackend());
+            System.out.println("[Impulse UI] Standalone frontend: " + frontend.getAbsolutePath() + " (" + frontend.length() + " bytes)");
+            window = new Webview(Boolean.getBoolean("impulse.ui.debug"));
+            this.webview = window;
+            startParentWatchdog();
+            window.setTitle("Impulse - Choose a server");
+            window.setMinSize(760, 520);
+            window.setSize(1180, 760);
+            window.bind("impulseBridge", this::bridge);
+            System.out.println("[Impulse UI] Navigating to " + frontendUrl);
+            window.loadURL(frontendUrl);
+            startFrontendReadyWatchdog();
+            webviewRunning = true;
+            window.run();
+        } catch (Throwable error) {
+            System.err.println("[Impulse UI] WebView startup or navigation failed: " + clean(error.getMessage(), error.getClass().getSimpleName()));
+            if (error instanceof Exception) throw (Exception) error;
+            if (error instanceof Error) throw (Error) error;
+            throw new RuntimeException(error);
+        } finally {
+            System.out.println("[Impulse UI] Cleaning up standalone WebView resources.");
+            webviewRunning = false;
+            webview = null;
+            for (Operation operation : operationMap.values()) operation.cancel();
+            operations.shutdownNow();
+            images.shutdownNow();
+            awaitExecutor(operations);
+            awaitExecutor(images);
+            operationMap.clear();
+            imageJobs.clear();
+            System.out.println("[Impulse UI] Standalone WebView cleanup complete.");
+        }
         if (!completed) writeResult(legalAccepted ? "fallback" : "quit", null, null);
+    }
+
+    private void startParentWatchdog() {
+        if (request.parent_pid <= 0L) return;
+        Thread watchdog = new Thread(() -> {
+            while (!completed && webview != null) {
+                boolean parentAlive = ProcessHandle.of(request.parent_pid).map(ProcessHandle::isAlive).orElse(false);
+                if (!parentAlive) {
+                    System.err.println("[Impulse UI] Minecraft exited; closing the standalone selector.");
+                    completed = true;
+                    closeWindow();
+                    return;
+                }
+                try { Thread.sleep(2000L); }
+                catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return; }
+            }
+        }, "impulse-parent-watchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+    }
+
+    private void startFrontendReadyWatchdog() {
+        Thread watchdog = new Thread(() -> {
+            try { Thread.sleep(FRONTEND_READY_TIMEOUT_MS); }
+            catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return; }
+            if (frontendReady || completed || webview == null) return;
+            System.err.println("[Impulse UI] React frontend did not become ready within 60 seconds; closing the WebView.");
+            writeResult(legalAccepted ? "fallback" : "quit", null,
+                new IOException("The standalone web interface did not become ready."));
+            completed = true;
+            closeWindow();
+        }, "impulse-frontend-ready-watchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+    }
+
+    private static void awaitExecutor(ExecutorService executor) {
+        try {
+            if (!executor.awaitTermination(2L, TimeUnit.SECONDS)) {
+                System.err.println("[Impulse UI] A background worker did not stop before shutdown.");
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private co.casterlabs.rakurai.json.element.JsonElement bridge(JsonArray arguments) {
@@ -137,8 +217,14 @@ public final class ImpulseStandaloneUi {
     }
 
     private Object handle(String action, JsonObject command) throws Exception {
-        if ("ready".equals(action) || "heartbeat".equals(action)) {
+        if ("ready".equals(action)) {
+            frontendReady = true;
             writeSignal("ready");
+            writeSignal("heartbeat");
+            System.out.println("[Impulse UI] React bridge ready.");
+            return Collections.singletonMap("time", System.currentTimeMillis());
+        }
+        if ("heartbeat".equals(action)) {
             writeSignal("heartbeat");
             return Collections.singletonMap("time", System.currentTimeMillis());
         }
@@ -155,6 +241,22 @@ public final class ImpulseStandaloneUi {
         }
         if ("setUpdateChannel".equals(action)) {
             setUpdateChannel(string(command, "channel"));
+            return state();
+        }
+        if ("completeOnboarding".equals(action)) {
+            setOnboardingVersion(1);
+            return state();
+        }
+        if ("replayOnboarding".equals(action)) {
+            setOnboardingVersion(0);
+            return state();
+        }
+        if ("dismissUpdate".equals(action)) {
+            dismissUpdate(required(command, "id"));
+            return state();
+        }
+        if ("refreshUpdates".equals(action)) {
+            refreshUpdates();
             return state();
         }
         if ("acceptLegal".equals(action)) {
@@ -209,6 +311,10 @@ public final class ImpulseStandaloneUi {
         state.put("selected_profile", selected);
         state.put("manifest", manifest);
         state.put("update_channel", loadUpdateChannel());
+        state.put("impulse_version", clean(request.impulse_version, "unknown"));
+        state.put("onboarding_completed", loadOnboardingVersion() >= 1);
+        state.put("dismissed_update_ids", dismissedUpdateIds());
+        state.put("publications", updateRegistry == null ? Collections.emptyList() : updateRegistry.publications);
         state.put("minecraft_version", request.minecraft_version);
         state.put("loader", request.loader);
         if (currentRestriction != null) state.put("restriction", restrictionMap(currentRestriction));
@@ -676,12 +782,32 @@ public final class ImpulseStandaloneUi {
         catch (Throwable error) { System.err.println("[Impulse UI] Could not enable per-monitor DPI awareness: " + error.getMessage()); }
     }
 
-    private String singleFileDataUrl() throws IOException {
+    private File extractFrontend() throws IOException {
+        File assetsDirectory = new File(request.assets_directory);
+        File bundleRoot = assetsDirectory.getParentFile();
+        if (bundleRoot == null || !bundleRoot.isDirectory()) throw new IOException("The standalone UI bundle directory is unavailable.");
+        File webDirectory = new File(bundleRoot, "web");
+        if (!webDirectory.exists() && !webDirectory.mkdirs()) throw new IOException("Could not create the standalone frontend directory.");
+        File target = new File(webDirectory, "index.html");
+        byte[] html;
         try (InputStream input = ImpulseStandaloneUi.class.getResourceAsStream("/standalone-web/index.html")) {
             if (input == null) throw new IOException("The embedded standalone web application is missing.");
-            byte[] html = readLimited(input, 8 * 1024 * 1024);
-            return "data:text/html;base64," + Base64.getEncoder().encodeToString(html);
+            html = readLimited(input, MAX_FRONTEND_BYTES);
         }
+        if (html.length == 0) throw new IOException("The embedded standalone web application is empty.");
+        File temporary = new File(webDirectory, "index.html." + UUID.randomUUID() + ".part");
+        Files.write(temporary.toPath(), html, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+        try { Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
+        catch (Exception ignored) { Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING); }
+        if (!target.isFile() || target.length() != html.length) throw new IOException("The standalone frontend could not be extracted completely.");
+        return target;
+    }
+
+    private static String webviewBackend() {
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (os.contains("win")) return "WebView2";
+        if (os.contains("mac")) return "WKWebView";
+        return "WebKitGTK";
     }
 
     private boolean loadLegalAcceptance() {
@@ -709,18 +835,133 @@ public final class ImpulseStandaloneUi {
         } catch (Exception ignored) { return "stable"; }
     }
 
+    private int loadOnboardingVersion() {
+        JsonObject settings = loadStandaloneSettings();
+        try { return settings.has("onboarding_version") ? Math.max(0, settings.get("onboarding_version").getAsInt()) : 0; }
+        catch (Exception ignored) { return 0; }
+    }
+
+    private void setOnboardingVersion(int version) throws IOException {
+        JsonObject settings = loadStandaloneSettings();
+        settings.addProperty("onboarding_version", Math.max(0, version));
+        writeJsonAtomic(standaloneSettingsFile(), settings);
+    }
+
+    private List<String> dismissedUpdateIds() {
+        JsonObject settings = loadStandaloneSettings();
+        List<String> ids = new ArrayList<String>();
+        if (!settings.has("dismissed_update_ids") || !settings.get("dismissed_update_ids").isJsonArray()) return ids;
+        for (JsonElement item : settings.getAsJsonArray("dismissed_update_ids")) {
+            if (item.isJsonPrimitive()) {
+                String id = item.getAsString().trim();
+                if (!id.isEmpty() && !ids.contains(id)) ids.add(id);
+            }
+        }
+        return ids;
+    }
+
+    private void dismissUpdate(String id) throws IOException {
+        boolean known = updateRegistry != null && updateRegistry.publications != null
+            && updateRegistry.publications.stream().anyMatch(publication -> id.equals(publication.id));
+        if (!known) throw new IOException("This update publication is no longer available.");
+        JsonObject settings = loadStandaloneSettings();
+        List<String> ids = dismissedUpdateIds();
+        if (!ids.contains(id)) ids.add(id);
+        ids.sort(String::compareTo);
+        settings.add("dismissed_update_ids", GSON.toJsonTree(ids));
+        writeJsonAtomic(standaloneSettingsFile(), settings);
+    }
+
+    private File standaloneSettingsFile() {
+        return new File(gameDirectory, "impulse/standalone/settings.json");
+    }
+
+    private JsonObject loadStandaloneSettings() {
+        try {
+            File file = standaloneSettingsFile();
+            if (!file.isFile()) return new JsonObject();
+            JsonElement parsed = new JsonParser().parse(Files.readString(file.toPath(), StandardCharsets.UTF_8));
+            return parsed.isJsonObject() ? parsed.getAsJsonObject() : new JsonObject();
+        } catch (Exception ignored) { return new JsonObject(); }
+    }
+
     private void setUpdateChannel(String channel) throws IOException {
         String normalized = "beta".equalsIgnoreCase(channel) ? "beta" : "stable";
-        File file = new File(gameDirectory, "impulse/standalone/settings.json");
-        Map<String, Object> values = new LinkedHashMap<String, Object>();
+        JsonObject settings = loadStandaloneSettings();
+        settings.addProperty("update_channel", normalized);
+        writeJsonAtomic(standaloneSettingsFile(), settings);
+    }
+
+    private File updatesCacheFile() {
+        return new File(gameDirectory, "impulse/standalone/ui/cache/standalone-updates.json");
+    }
+
+    private File updatesEtagFile() {
+        return new File(gameDirectory, "impulse/standalone/ui/cache/standalone-updates.etag");
+    }
+
+    private UpdateRegistry loadCachedUpdates() {
         try {
-            if (file.isFile()) {
-                Map<?, ?> existing = GSON.fromJson(Files.readString(file.toPath(), StandardCharsets.UTF_8), Map.class);
-                if (existing != null) for (Map.Entry<?, ?> entry : existing.entrySet()) values.put(String.valueOf(entry.getKey()), entry.getValue());
+            File cache = updatesCacheFile();
+            if (!cache.isFile()) return new UpdateRegistry();
+            return parseUpdateRegistry(Files.readString(cache.toPath(), StandardCharsets.UTF_8));
+        } catch (Exception error) {
+            System.err.println("[Impulse UI] Ignoring invalid cached standalone updates: " + error.getMessage());
+            return new UpdateRegistry();
+        }
+    }
+
+    private void refreshUpdates() {
+        HttpURLConnection connection = null;
+        try {
+            String configured = System.getProperty("impulse.updates.api", UPDATES_URL).trim();
+            URI uri = URI.create(configured);
+            boolean local = "http".equalsIgnoreCase(uri.getScheme()) && ("127.0.0.1".equals(uri.getHost()) || "localhost".equalsIgnoreCase(uri.getHost()));
+            if (!"https".equalsIgnoreCase(uri.getScheme()) && !local) throw new IOException("Standalone updates must use HTTPS.");
+            connection = (HttpURLConnection) uri.toURL().openConnection();
+            connection.setConnectTimeout(4000);
+            connection.setReadTimeout(6000);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("User-Agent", "Impulse-Standalone/" + clean(request.impulse_version, "unknown"));
+            File etagFile = updatesEtagFile();
+            if (etagFile.isFile()) connection.setRequestProperty("If-None-Match", Files.readString(etagFile.toPath(), StandardCharsets.UTF_8).trim());
+            int status = connection.getResponseCode();
+            if (status == HttpURLConnection.HTTP_NOT_MODIFIED) return;
+            if (status != HttpURLConnection.HTTP_OK) throw new IOException("Standalone updates returned HTTP " + status + ".");
+            String body;
+            try (InputStream input = connection.getInputStream()) { body = new String(readLimited(input, MAX_UPDATES_BYTES), StandardCharsets.UTF_8); }
+            UpdateRegistry parsed = parseUpdateRegistry(body);
+            writeJsonAtomic(updatesCacheFile(), parsed);
+            String etag = clean(connection.getHeaderField("ETag"), "");
+            if (!etag.isEmpty()) {
+                File parent = updatesEtagFile().getParentFile();
+                if (!parent.exists()) parent.mkdirs();
+                Files.writeString(updatesEtagFile().toPath(), etag, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
             }
-        } catch (Exception ignored) { }
-        values.put("update_channel", normalized);
-        writeJsonAtomic(file, values);
+            updateRegistry = parsed;
+        } catch (Exception error) {
+            System.err.println("[Impulse UI] Could not refresh standalone updates; using cache: " + error.getMessage());
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private UpdateRegistry parseUpdateRegistry(String body) throws IOException {
+        UpdateRegistry registry;
+        try { registry = GSON.fromJson(body, UpdateRegistry.class); }
+        catch (Exception error) { throw new IOException("Invalid standalone updates JSON.", error); }
+        if (registry == null || registry.schema_version != 1 || registry.publications == null) throw new IOException("Unsupported standalone updates registry.");
+        Set<String> ids = new HashSet<String>();
+        for (UpdatePublication publication : registry.publications) {
+            if (publication == null || !publication.valid() || !ids.add(publication.id)) throw new IOException("Invalid standalone update publication.");
+        }
+        registry.publications.sort((left, right) -> Long.compare(parseTime(right.published_at), parseTime(left.published_at)));
+        return registry;
+    }
+
+    private static long parseTime(String value) {
+        try { return Instant.parse(value).toEpochMilli(); }
+        catch (Exception ignored) { return 0L; }
     }
 
     private void writeJsonAtomic(File target, Object value) throws IOException {
@@ -752,7 +993,13 @@ public final class ImpulseStandaloneUi {
 
     private void closeWindow() {
         Webview current = webview;
-        if (current != null) current.dispatch(current::close);
+        if (current == null) return;
+        try {
+            if (webviewRunning) current.dispatch(current::close);
+            else current.close();
+        } catch (Throwable error) {
+            System.err.println("[Impulse UI] Could not close the native WebView cleanly: " + error.getMessage());
+        }
     }
 
     private static void writeFailure(ImpulseStandaloneBootstrap.UiRequest request, Throwable error) {
@@ -812,6 +1059,48 @@ public final class ImpulseStandaloneUi {
 
     private static String clean(String value, String fallback) {
         return value == null || value.trim().isEmpty() ? fallback : value.trim();
+    }
+
+    private static final class UpdateRegistry {
+        int schema_version = 1;
+        List<UpdatePublication> publications = new ArrayList<UpdatePublication>();
+    }
+
+    private static final class UpdatePublication {
+        String id;
+        String title;
+        String subtitle;
+        List<String> versions;
+        String published_at;
+        String hero_image_url;
+        List<UpdateSection> sections;
+
+        boolean valid() {
+            if (!clean(id, "").matches("[a-z0-9][a-z0-9-]{0,79}")) return false;
+            if (clean(title, "").isEmpty() || clean(title, "").length() > 120) return false;
+            if (clean(subtitle, "").isEmpty() || clean(subtitle, "").length() > 240) return false;
+            if (versions == null || versions.isEmpty() || versions.size() > 100) return false;
+            for (String version : versions) if (!clean(version, "").matches("\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?")) return false;
+            if (parseTime(published_at) <= 0L || sections == null || sections.isEmpty() || sections.size() > 8) return false;
+            if (hero_image_url != null && !hero_image_url.trim().isEmpty()) {
+                try { if (!"https".equalsIgnoreCase(URI.create(hero_image_url).getScheme())) return false; }
+                catch (Exception ignored) { return false; }
+            }
+            for (UpdateSection section : sections) if (section == null || !section.valid()) return false;
+            return true;
+        }
+    }
+
+    private static final class UpdateSection {
+        String icon;
+        String title;
+        String body;
+
+        boolean valid() {
+            return UPDATE_ICONS.contains(clean(icon, ""))
+                && !clean(title, "").isEmpty() && clean(title, "").length() <= 100
+                && !clean(body, "").isEmpty() && clean(body, "").length() <= 500;
+        }
     }
 
     private static final class Operation {

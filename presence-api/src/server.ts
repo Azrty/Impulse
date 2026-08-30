@@ -83,6 +83,70 @@ function cleanReportText(value: unknown, maxLength: number): string {
 }
 
 type BlockedServerEntry = { host: string; ipv4: string[]; reason_code: string };
+type StandaloneUpdateSection = { icon: string; title: string; body: string };
+type StandaloneUpdatePublication = {
+  id: string;
+  title: string;
+  subtitle: string;
+  versions: string[];
+  published_at: string;
+  hero_image_url: string | null;
+  sections: StandaloneUpdateSection[];
+};
+
+const STANDALONE_UPDATE_ICONS = new Set(['sparkles', 'shield-check', 'package-plus', 'scan-check', 'wrench', 'rocket', 'server', 'download']);
+const EXACT_MOD_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/u;
+
+function boundedText(value: unknown, name: string, max: number): string {
+  if (typeof value !== 'string') throw new Error(`${name} must be a string.`);
+  const cleaned = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, '').trim();
+  if (!cleaned || [...cleaned].length > max) throw new Error(`${name} must contain between 1 and ${max} characters.`);
+  return cleaned;
+}
+
+export function sanitizeStandaloneUpdates(value: unknown): { schema_version: 1; publications: StandaloneUpdatePublication[] } {
+  const source = value as { schema_version?: unknown; publications?: unknown } | null;
+  if (source?.schema_version !== 1 || !Array.isArray(source.publications)) throw new Error('Invalid standalone updates registry.');
+  const ids = new Set<string>();
+  const publications = source.publications.map((raw, publicationIndex) => {
+    const item = raw as Record<string, unknown> | null;
+    const id = boundedText(item?.id, `publications[${publicationIndex}].id`, 80).toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]*$/u.test(id) || ids.has(id)) throw new Error(`Invalid or duplicate standalone update id: ${id}`);
+    ids.add(id);
+    if (!Array.isArray(item?.versions) || item.versions.length === 0 || item.versions.length > 100) throw new Error(`${id} must target between 1 and 100 versions.`);
+    const versions = [...new Set(item.versions.map((version) => boundedText(version, `${id}.versions`, 64)))];
+    if (versions.some((version) => !EXACT_MOD_VERSION.test(version))) throw new Error(`${id} contains an invalid exact version.`);
+    const published = boundedText(item?.published_at, `${id}.published_at`, 64);
+    if (!Number.isFinite(Date.parse(published))) throw new Error(`${id} has an invalid publication date.`);
+    let heroImageUrl: string | null = null;
+    if (item?.hero_image_url !== null && item?.hero_image_url !== undefined) {
+      const candidate = new URL(boundedText(item.hero_image_url, `${id}.hero_image_url`, 2048));
+      if (candidate.protocol !== 'https:') throw new Error(`${id} hero image must use HTTPS.`);
+      heroImageUrl = candidate.toString();
+    }
+    if (!Array.isArray(item?.sections) || item.sections.length === 0 || item.sections.length > 8) throw new Error(`${id} must contain between 1 and 8 sections.`);
+    const sections = item.sections.map((rawSection, sectionIndex) => {
+      const section = rawSection as Record<string, unknown> | null;
+      const icon = boundedText(section?.icon, `${id}.sections[${sectionIndex}].icon`, 32);
+      if (!STANDALONE_UPDATE_ICONS.has(icon)) throw new Error(`${id} uses unsupported icon ${icon}.`);
+      return {
+        icon,
+        title: boundedText(section?.title, `${id}.sections[${sectionIndex}].title`, 100),
+        body: boundedText(section?.body, `${id}.sections[${sectionIndex}].body`, 500),
+      };
+    });
+    return {
+      id,
+      title: boundedText(item?.title, `${id}.title`, 120),
+      subtitle: boundedText(item?.subtitle, `${id}.subtitle`, 240),
+      versions,
+      published_at: new Date(published).toISOString(),
+      hero_image_url: heroImageUrl,
+      sections,
+    };
+  }).sort((left, right) => Date.parse(right.published_at) - Date.parse(left.published_at));
+  return { schema_version: 1, publications };
+}
 
 export function sanitizeBlockedServerRegistry(value: unknown): { schema_version: 1; servers: BlockedServerEntry[] } {
   const source = value as { servers?: unknown } | null;
@@ -280,6 +344,17 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     const body = JSON.stringify(blockedServers);
     return { body, etag: `"${crypto.createHash('sha256').update(body).digest('hex')}"` };
   }
+  const standaloneUpdatesPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/standalone-updates.json');
+  let standaloneUpdates = sanitizeStandaloneUpdates(JSON.parse(await readFile(standaloneUpdatesPath, 'utf8')));
+  async function currentStandaloneUpdates(): Promise<{ body: string; etag: string }> {
+    try {
+      standaloneUpdates = sanitizeStandaloneUpdates(JSON.parse(await readFile(standaloneUpdatesPath, 'utf8')));
+    } catch (error) {
+      app.log.warn({ error }, 'Unable to refresh standalone updates; serving last valid copy');
+    }
+    const body = JSON.stringify(standaloneUpdates);
+    return { body, etag: `"${crypto.createHash('sha256').update(body).digest('hex')}"` };
+  }
 
   app.get('/v1/mod-verification/recognized-mods', async (request, reply) => {
     reply.header('Cache-Control', 'public, max-age=3600, stale-if-error=86400');
@@ -291,6 +366,14 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   app.get('/v1/security/blocked-servers', async (request, reply) => {
     const registry = await currentBlockedServers();
     reply.header('Cache-Control', 'public, max-age=300, stale-if-error=86400');
+    reply.header('ETag', registry.etag);
+    if (request.headers['if-none-match'] === registry.etag) return reply.code(304).send();
+    return reply.type('application/json; charset=utf-8').send(registry.body);
+  });
+
+  app.get('/v1/standalone/updates', async (request, reply) => {
+    const registry = await currentStandaloneUpdates();
+    reply.header('Cache-Control', 'public, max-age=900, stale-if-error=86400');
     reply.header('ETag', registry.etag);
     if (request.headers['if-none-match'] === registry.etag) return reply.code(304).send();
     return reply.type('application/json; charset=utf-8').send(registry.body);

@@ -36,6 +36,8 @@ export type Version = { id: string; name?: string; version_number: string; versi
 export type InstallPlan = { channel: string; items: Record<string, { project: Project; version: Version; file: { filename: string; size: number }; explicit: boolean; required_by?: string[] }>; optional_dependencies?: { project_id: string; name: string }[] };
 export type GlobalMod = { file_name: string; name?: string; project_id?: string; version_number?: string; compatibility?: string; reason?: string; icon_url?: string; size?: number; managed?: boolean };
 export type Operation = { id: string; kind: string; status: 'running' | 'done' | 'error' | 'cancelled'; message: string; completed?: number; total?: number; result?: unknown; error?: string };
+export type UpdateSection = { icon: 'sparkles' | 'shield-check' | 'package-plus' | 'scan-check' | 'wrench' | 'rocket' | 'server' | 'download'; title: string; body: string };
+export type UpdatePublication = { id: string; title: string; subtitle: string; versions: string[]; published_at: string; hero_image_url?: string | null; sections: UpdateSection[] };
 export type State = {
   legal_accepted: boolean;
   legal_version: string;
@@ -47,6 +49,10 @@ export type State = {
   manifest?: Manifest;
   restriction?: Restriction;
   update_channel: 'stable' | 'beta';
+  impulse_version: string;
+  onboarding_completed: boolean;
+  dismissed_update_ids: string[];
+  publications: UpdatePublication[];
   custom_mods?: CustomMod[];
   minecraft_version: string;
   loader: string;

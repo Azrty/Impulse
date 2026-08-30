@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ArrowLeft, Check, ChevronRight, Download, ExternalLink, FileWarning,
-  Flag, Globe2, ImageOff, LoaderCircle, LockKeyhole, MoreHorizontal, Package, Play, Plus,
-  RefreshCw, Search, Server, Settings2, ShieldCheck, Trash2, Wrench, X,
+  AlertTriangle, ArrowLeft, Check, ChevronLeft, ChevronRight, Cog, Download, ExternalLink, FileWarning,
+  Flag, Globe2, History, ImageOff, LoaderCircle, LockKeyhole, MoreHorizontal, Package, PackagePlus, Play, Plus,
+  RefreshCw, Rocket, ScanSearch, Search, Server, Settings2, ShieldCheck, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react';
 import { heartbeat, invoke } from './bridge';
 import impulseLogo from './generated/impulse-logo.png';
-import type { CustomMod, GlobalMod, InstallPlan, Manifest, Mod, Operation, Profile, Project, SearchProject, State, Version } from './types';
+import type { CustomMod, GlobalMod, InstallPlan, Manifest, Mod, Operation, Profile, Project, SearchProject, State, UpdatePublication, UpdateSection, Version } from './types';
 
 type Tab = 'overview' | 'mods';
 type ModView = 'installed' | 'search' | 'project' | 'versions';
@@ -59,7 +59,10 @@ export function App() {
   const [notice, setNotice] = useState('');
   const [optionalOpen, setOptionalOpen] = useState(false);
   const [modManagerOpen, setModManagerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [newsOpen, setNewsOpen] = useState(false);
   const pollRef = useRef<number | undefined>(undefined);
+  const updatesRefreshed = useRef(false);
   const pageRef = useRef<HTMLDivElement>(null);
 
   const loadState = useCallback(async () => {
@@ -73,6 +76,12 @@ export function App() {
     const id = window.setInterval(heartbeat, 5000);
     return () => window.clearInterval(id);
   }, [loadState]);
+
+  useEffect(() => {
+    if (!state?.legal_accepted || updatesRefreshed.current) return;
+    updatesRefreshed.current = true;
+    void invoke<State>('refreshUpdates').then(setState).catch(() => undefined);
+  }, [state?.legal_accepted]);
 
   useEffect(() => {
     const edit = async (event: KeyboardEvent) => {
@@ -184,6 +193,11 @@ export function App() {
 
   if (!state) return <Boot error={error} />;
   if (!state.legal_accepted) return <Legal state={state} onAccepted={setState} />;
+  if (!state.onboarding_completed) return <Onboarding onComplete={async () => setState(await invoke<State>('completeOnboarding'))} />;
+
+  const pendingPublication = (state.publications || []).find(publication =>
+    publication.versions.includes(state.impulse_version) && !(state.dismissed_update_ids || []).includes(publication.id));
+  if (pendingPublication) return <WhatsNew publication={pendingPublication} mode="automatic" onClose={async () => setState(await invoke<State>('dismissUpdate', { id: pendingPublication.id }))} />;
 
   const profile = state.selected_profile;
   const manifest = state.manifest;
@@ -213,9 +227,9 @@ export function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong><span>Standalone</span></div>
-        <div className="channel" aria-label="Update channel">
-          <span>Updates</span>
-          {(['stable', 'beta'] as const).map(channel => <button key={channel} className={state.update_channel === channel ? 'active' : ''} onClick={async () => setState(await invoke<State>('setUpdateChannel', { channel }))}>{channel}</button>)}
+        <div className="topbar-actions">
+          <button className="whats-new-button" onClick={() => setNewsOpen(true)}><Sparkles size={15} /> What’s new</button>
+          <button className="icon-button topbar-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Cog size={17} /></button>
         </div>
       </header>
 
@@ -272,6 +286,8 @@ export function App() {
       {optionalOpen && profile && manifest && <OptionalMods profile={profile} manifest={manifest} onClose={() => setOptionalOpen(false)} onSave={ids => { setOptionalOpen(false); start('optional', { profile_id: profile.id, ids }); }} />}
       {warning && <VerificationWarning warning={warning} onCancel={() => setWarning(undefined)} onContinue={() => { setWarning(undefined); launch(true); }} />}
       {modManagerOpen && profile && <ModManager profile={profile} state={state} start={start} operation={operation} onClose={async () => { setModManagerOpen(false); await loadState(); }} />}
+      {settingsOpen && <StandaloneSettings state={state} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onNews={() => { setSettingsOpen(false); setNewsOpen(true); }} />}
+      {newsOpen && <NewsHistory publications={state.publications || []} currentVersion={state.impulse_version} dismissed={state.dismissed_update_ids || []} onClose={() => setNewsOpen(false)} />}
     </div>
   );
 }
@@ -286,6 +302,62 @@ function Legal({ state, onAccepted }: { state: State; onAccepted: (state: State)
   const [busy, setBusy] = useState(false);
   const open = (url: string) => invoke('openExternal', { url });
   return <div className="legal-screen"><div className="legal-card"><div className="legal-icon"><ShieldCheck /></div><span className="eyebrow">Before you continue</span><h1>Welcome to Impulse</h1><p>Impulse needs your agreement to its Privacy Policy and Terms of Service. These documents explain how the software works, the services it contacts, and the rules that apply when you use it.</p><div className="legal-links"><button onClick={() => open(state.privacy_url)}>Privacy Policy <ExternalLink size={15} /></button><button onClick={() => open(state.terms_url)}>Terms of Service <ExternalLink size={15} /></button></div><label className="check"><input type="checkbox" checked={privacy} onChange={e => setPrivacy(e.target.checked)} /><span><Check size={14} /></span>I have read and accept the Privacy Policy.</label><label className="check"><input type="checkbox" checked={terms} onChange={e => setTerms(e.target.checked)} /><span><Check size={14} /></span>I have read and accept the Terms of Service.</label><div className="modal-actions"><button className="secondary" onClick={() => invoke('quit')}>Quit Minecraft</button><button className="primary" disabled={!privacy || !terms || busy} onClick={async () => { setBusy(true); onAccepted(await invoke<State>('acceptLegal')); }}>Accept and continue</button></div></div></div>;
+}
+
+const onboardingPages = [
+  { eyebrow: 'Welcome to standalone', title: 'Welcome to Impulse', body: 'Keep every server in one place. Add an address once, choose it whenever you want to play, and let Impulse handle the preparation.', icon: Server, visual: 'servers' },
+  { eyebrow: 'Prepared for you', title: 'Ready when you are', body: 'Impulse checks the server and prepares the right files before Minecraft continues, so joining stays simple even when the server changes.', icon: Rocket, visual: 'ready' },
+  { eyebrow: 'Your experience', title: 'Make it yours', body: 'Choose optional server mods or discover compatible personal mods from Modrinth. Every choice stays attached to that server profile.', icon: PackagePlus, visual: 'mods' },
+  { eyebrow: 'Built with care', title: 'Launch with confidence', body: 'Modern file verification, automatic repairs and clear security warnings help you understand what will run before you press Play.', icon: ShieldCheck, visual: 'secure' },
+] as const;
+
+function Onboarding({ onComplete }: { onComplete: () => Promise<void> }) {
+  const [page, setPage] = useState(0);
+  const [leaving, setLeaving] = useState(false);
+  const current = onboardingPages[page];
+  const Icon = current.icon;
+  const finish = async () => { setLeaving(true); await onComplete(); };
+  return <div className={`onboarding ${leaving ? 'leaving' : ''}`}>
+    <div className="onboarding-backdrop" />
+    <header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong><span>Standalone</span></div><button className="onboarding-close" title="Close onboarding" onClick={finish}><X /></button></header>
+    <main key={page}>
+      <section className="onboarding-copy"><span className="eyebrow">{current.eyebrow}</span><h1>{current.title}</h1><p>{current.body}</p></section>
+      <section className={`onboarding-visual ${current.visual}`} aria-hidden="true"><div className="visual-core"><Icon /></div></section>
+    </main>
+    <footer><div className="onboarding-progress">{onboardingPages.map((_, index) => <button key={index} aria-label={`Page ${index + 1}`} className={index === page ? 'active' : index < page ? 'complete' : ''} onClick={() => setPage(index)} />)}</div><div className="onboarding-actions"><button className="secondary" disabled={page === 0} onClick={() => setPage(value => Math.max(0, value - 1))}><ChevronLeft /> Back</button>{page < onboardingPages.length - 1 ? <button className="primary" onClick={() => setPage(value => value + 1)}>Next <ChevronRight /></button> : <button className="primary" onClick={finish}>Get started <ChevronRight /></button>}</div></footer>
+  </div>;
+}
+
+function updateIcon(name: UpdateSection['icon']) {
+  if (name === 'shield-check') return ShieldCheck;
+  if (name === 'package-plus') return PackagePlus;
+  if (name === 'scan-check') return ScanSearch;
+  if (name === 'wrench') return Wrench;
+  if (name === 'rocket') return Rocket;
+  if (name === 'server') return Server;
+  if (name === 'download') return Download;
+  return Sparkles;
+}
+
+function WhatsNew({ publication, mode, onClose, onPrevious, onNext, position }: { publication: UpdatePublication; mode: 'automatic' | 'history'; onClose: () => void | Promise<void>; onPrevious?: () => void; onNext?: () => void; position?: string }) {
+  const hero = useNativeImage(publication.hero_image_url || undefined);
+  return <div className="whats-new-screen">
+    <div className="news-ambient" style={hero ? { backgroundImage: `linear-gradient(90deg, rgba(3,3,3,.93), rgba(3,3,3,.62)), url(${hero})` } : undefined} />
+    <header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong><span>{mode === 'automatic' ? 'Updated' : 'What’s new'}</span></div><button className="onboarding-close" title="Close" onClick={onClose}><X /></button></header>
+    <main><div className="news-heading"><span className="eyebrow">{mode === 'automatic' ? 'Impulse just got better' : new Date(publication.published_at).toLocaleDateString()}</span><h1>{publication.title}</h1><p>{publication.subtitle}</p><div className="news-versions">For {publication.versions.join(' · ')}</div></div><div className="news-sections">{publication.sections.map(section => { const Icon = updateIcon(section.icon); return <article key={`${publication.id}-${section.title}`}><span><Icon /></span><div><h2>{section.title}</h2><p>{section.body}</p></div></article>; })}</div></main>
+    <footer>{mode === 'history' ? <><button className="secondary news-nav" disabled={!onPrevious} onClick={onPrevious}><ChevronLeft /> Newer</button><span>{position}</span><button className="secondary news-nav" disabled={!onNext} onClick={onNext}>Older <ChevronRight /></button></> : <><span>Discover what changed, then continue to your servers.</span><button className="primary" onClick={onClose}>Continue <ChevronRight /></button></>}</footer>
+  </div>;
+}
+
+function NewsHistory({ publications, currentVersion, dismissed, onClose }: { publications: UpdatePublication[]; currentVersion: string; dismissed: string[]; onClose: () => void }) {
+  const [index, setIndex] = useState(0);
+  if (!publications.length) return <div className="modal-backdrop"><div className="modal"><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">What’s new</span><h2>No publications yet</h2><p>There are no standalone update notes available right now.</p><div className="modal-actions"><button className="primary" onClick={onClose}>Close</button></div></div></div>;
+  const publication = publications[Math.min(index, publications.length - 1)];
+  return <div className="news-history-layer"><WhatsNew publication={publication} mode="history" onClose={onClose} onPrevious={index > 0 ? () => setIndex(value => value - 1) : undefined} onNext={index < publications.length - 1 ? () => setIndex(value => value + 1) : undefined} position={`${index + 1} of ${publications.length}${publication.versions.includes(currentVersion) ? ' · This version' : ''}${dismissed.includes(publication.id) ? ' · Read' : ''}`} /></div>;
+}
+
+function StandaloneSettings({ state, onClose, onChange, onReplay, onNews }: { state: State; onClose: () => void; onChange: (state: State) => void; onReplay: () => void; onNews: () => void }) {
+  return <div className="modal-backdrop"><div className="modal settings-modal"><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">Impulse Standalone</span><h2>Settings</h2><p>Manage how this standalone installation behaves.</p><section className="settings-section"><div><strong>Update channel</strong><small>Stable receives production releases. Beta also receives previews.</small></div><div className="segments">{(['stable', 'beta'] as const).map(channel => <button key={channel} className={state.update_channel === channel ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setUpdateChannel', { channel }))}>{channel}</button>)}</div></section><section className="settings-section"><div><strong>What’s new</strong><small>Read current and previous standalone update notes.</small></div><button className="secondary" onClick={onNews}><History /> Open</button></section><section className="settings-section"><div><strong>Onboarding</strong><small>Replay the introduction to Impulse Standalone.</small></div><button className="secondary" onClick={onReplay}><Rocket /> Replay</button></section><footer className="settings-about"><span>Installed version</span><strong>{state.impulse_version}</strong></footer></div></div>;
 }
 
 function ServerRow({ profile, selected, onClick }: { profile: Profile; selected: boolean; onClick: () => void }) {

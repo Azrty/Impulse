@@ -3,6 +3,8 @@ import ReactPlayer from 'react-player';
 import {
   AlertTriangle,
   ArrowRight,
+  ChevronLeft,
+  Download,
   ExternalLink,
   FileText,
   Gauge,
@@ -15,13 +17,14 @@ import {
   Minus,
   Play,
   Plus,
+  Search,
   Server,
   Settings,
   ShieldCheck,
   Trash2,
   X
 } from 'lucide-react';
-import type { CrashReport, DiscordRpcSettings, GameStorage, ImpulseInvitation, ImpulseMod, LaunchProgress, OfflineDetails, OptionalModCategory, RunningGame, SavedServer, User as ImpulseUser } from './types';
+import type { CrashReport, CustomLauncherMod, DiscordRpcSettings, GameStorage, ImpulseInvitation, ImpulseMod, LaunchProgress, ModrinthProject, ModrinthSearchProject, ModrinthVersion, OfflineDetails, OptionalModCategory, RunningGame, SavedServer, User as ImpulseUser } from './types';
 import { IMPULSE_MOD_VERSION } from './version';
 import impulseIcon from '../assets/icon.png';
 
@@ -1149,6 +1152,7 @@ function ServerDetail({
   onMarkAnnouncementsRead,
   onCrashSharingChange,
   onOptionalChange,
+  onCustomModsChanged,
   restriction,
   onBack
 }: {
@@ -1165,6 +1169,7 @@ function ServerDetail({
   onMarkAnnouncementsRead: (ids: string[]) => void;
   onCrashSharingChange: (serverId: string, preference: 'ask' | 'always' | 'never') => void;
   onOptionalChange: (serverId: string, selections: Record<string, boolean>) => void;
+  onCustomModsChanged: (server: SavedServer, servers?: SavedServer[]) => void;
   restriction: ServerRestrictionDetails | null;
   onBack: () => void;
 }) {
@@ -1172,6 +1177,7 @@ function ServerDetail({
   const [now, setNow] = useState(Date.now());
   const [inviteCopied, setInviteCopied] = useState(false);
   const [conflictDecision, setConflictDecision] = useState<OptionalConflictDecision | null>(null);
+  const [customModsOpen, setCustomModsOpen] = useState(false);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30000);
     return () => window.clearInterval(timer);
@@ -1429,6 +1435,20 @@ function ServerDetail({
             </div>
           </div>}
 
+          {view === 'mods' && <div className="mt-6">
+            <div className="mb-3 flex items-center justify-between gap-4">
+              <div><h3 className="font-medium">Custom Mods</h3><p className="mt-1 text-xs text-white/40">Your personal Modrinth mods for this server profile.</p></div>
+              <button onClick={() => setCustomModsOpen(true)} disabled={busy} className="flex h-9 shrink-0 items-center gap-2 border border-white/15 px-3 text-xs hover:bg-white/10 disabled:opacity-50"><Plus size={14} /> Add custom mods</button>
+            </div>
+            <div className="divide-y divide-white/10 border border-white/10">
+              {(server.customMods || []).length === 0 ? <div className="p-4 text-sm text-white/50">No custom mods installed.</div> : (server.customMods || []).map((mod) => <div key={mod.projectId} className="flex items-center gap-3 p-3">
+                <div className="h-10 w-10 shrink-0 overflow-hidden rounded bg-white/5">{mod.iconUrl ? <img src={mod.iconUrl} alt="" className="h-full w-full object-cover" /> : <div className="grid h-full place-items-center"><Download size={16} className="text-white/35" /></div>}</div>
+                <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{mod.name}</p><p className="truncate text-xs text-white/40">{mod.versionNumber} · {mod.fileName}</p>{!mod.explicit && <p className="text-[10px] text-white/30">Required dependency</p>}</div>
+                <button onClick={() => setCustomModsOpen(true)} className="border border-white/15 px-3 py-1.5 text-xs hover:bg-white/10">Manage</button>
+              </div>)}
+            </div>
+          </div>}
+
           {view === 'overview' && !progress && !error && !crash && (
             <div className="mt-6 grid gap-3 sm:grid-cols-3">
               <div className="border border-white/10 p-3"><div className="text-xs text-white/40">Required mods</div><div className="mt-1 text-lg font-semibold">{manifest.mods.length}</div></div>
@@ -1503,8 +1523,85 @@ function ServerDetail({
           </button>
         </aside>
       </div>
+      {customModsOpen && <CustomModsManager server={server} onClose={() => setCustomModsOpen(false)} onChanged={onCustomModsChanged} />}
     </div>
   );
+}
+
+function CustomModsManager({ server, onClose, onChanged }: { server: SavedServer; onClose: () => void; onChanged: (server: SavedServer, servers?: SavedServer[]) => void }) {
+  const [query, setQuery] = useState('');
+  const [channel, setChannel] = useState<'release' | 'beta' | 'all'>('release');
+  const [results, setResults] = useState<ModrinthSearchProject[]>([]);
+  const [project, setProject] = useState<ModrinthProject | null>(null);
+  const [versions, setVersions] = useState<ModrinthVersion[]>([]);
+  const [selectedVersion, setSelectedVersion] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const installed = server.customMods || [];
+
+  const search = async (event?: FormEvent) => {
+    event?.preventDefault();
+    setBusy(true); setError(''); setProject(null);
+    const response = await window.api?.searchCustomMods(server.id, query);
+    setBusy(false);
+    if (!response?.success) { setError(response?.error || 'Unable to search Modrinth.'); return; }
+    setResults(response.projects || []);
+  };
+
+  const openProject = async (projectId: string, nextChannel = channel) => {
+    setBusy(true); setError('');
+    const response = await window.api?.getCustomModProject(server.id, projectId, nextChannel);
+    setBusy(false);
+    if (!response?.success || !response.project) { setError(response?.error || 'Unable to load this project.'); return; }
+    setProject(response.project); setVersions(response.versions || []); setSelectedVersion(response.versions?.[0]?.id || '');
+  };
+
+  const changeChannel = async (value: 'release' | 'beta' | 'all') => {
+    setChannel(value);
+    if (project) await openProject(project.project_id, value);
+  };
+
+  const install = async () => {
+    if (!project || !selectedVersion) return;
+    setBusy(true); setError('');
+    const response = await window.api?.installCustomMod(server.id, project.project_id, selectedVersion, channel);
+    setBusy(false);
+    if (!response?.success || !response.server) { setError(response?.error || 'Unable to install this mod.'); return; }
+    onChanged(response.server, response.servers);
+  };
+
+  const remove = async (mod: CustomLauncherMod) => {
+    if (!mod.explicit) return;
+    setBusy(true); setError('');
+    const response = await window.api?.removeCustomMod(server.id, mod.projectId);
+    setBusy(false);
+    if (!response?.success || !response.server) { setError(response?.error || 'Unable to remove this mod.'); return; }
+    onChanged(response.server, response.servers);
+    if (project?.project_id === mod.projectId) setProject(null);
+  };
+
+  const installedProject = project ? installed.find((mod) => mod.projectId === project.project_id) : undefined;
+  const selected = versions.find((version) => version.id === selectedVersion);
+  return <div className="fixed inset-0 z-[70] flex flex-col bg-[#050505]">
+    <header className="flex h-16 shrink-0 items-center gap-4 border-b border-white/10 px-6">
+      {project && <button onClick={() => setProject(null)} className="grid h-9 w-9 place-items-center border border-white/15 hover:bg-white/10"><ChevronLeft size={18} /></button>}
+      <div className="min-w-0"><h2 className="font-semibold">Custom Mods</h2><p className="text-xs text-white/40">{server.manifest.minecraft.version} · {server.manifest.minecraft.loader === 'neoforge' ? 'NeoForge' : 'Forge'}</p></div>
+      <div className="ml-auto flex rounded border border-white/15 p-1">{(['release', 'beta', 'all'] as const).map(value => <button key={value} onClick={() => changeChannel(value)} className={`h-7 px-3 text-xs capitalize ${channel === value ? 'bg-white text-black' : 'text-white/50 hover:text-white'}`}>{value}</button>)}</div>
+      <button onClick={onClose} className="grid h-9 w-9 place-items-center border border-white/15 hover:bg-white/10"><X size={18} /></button>
+    </header>
+    {error && <div className="border-b border-red-300/20 bg-red-950/20 px-6 py-3 text-sm text-red-100">{error}</div>}
+    {!project ? <>
+      <form onSubmit={search} className="flex shrink-0 gap-2 border-b border-white/10 p-4 sm:px-8"><div className="flex h-11 min-w-0 flex-1 items-center gap-3 border border-white/15 bg-black px-3"><Search size={17} className="text-white/35" /><input value={query} onChange={event => setQuery(event.currentTarget.value)} placeholder="Search Modrinth" className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none" /></div><button disabled={busy || !query.trim()} className="bg-white px-5 text-sm font-medium text-black disabled:opacity-40">Search</button></form>
+      <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-8 scrollbar-thin"><div className="mx-auto max-w-5xl">
+        {!query && <><div className="mb-4 flex items-center justify-between"><h3 className="font-medium">Installed</h3><span className="text-xs text-white/40">{installed.length} mods</span></div><div className="grid gap-3 sm:grid-cols-2">{installed.map(mod => <button key={mod.projectId} onClick={() => openProject(mod.projectId)} className="flex min-w-0 items-center gap-3 border border-white/10 bg-white/[0.02] p-3 text-left transition hover:border-white/25 hover:bg-white/[0.05]"><div className="h-12 w-12 shrink-0 overflow-hidden rounded bg-white/5">{mod.iconUrl ? <img src={mod.iconUrl} alt="" className="h-full w-full object-cover" /> : null}</div><span className="min-w-0"><strong className="block truncate text-sm">{mod.name}</strong><small className="block truncate text-white/40">{mod.versionNumber}{!mod.explicit ? ' · Dependency' : ''}</small></span></button>)}</div>{!installed.length && <div className="border border-dashed border-white/15 p-8 text-center text-sm text-white/40">Search Modrinth to add mods to this profile.</div>}</>}
+        {!!query && <div className="space-y-2">{busy ? <div className="grid min-h-64 place-items-center"><Loader2 className="animate-spin" /></div> : results.map(item => <button key={item.project_id} onClick={() => openProject(item.project_id)} className="flex w-full min-w-0 items-center gap-4 border border-white/10 bg-white/[0.02] p-3 text-left transition hover:border-white/25 hover:bg-white/[0.05]"><div className="h-14 w-14 shrink-0 overflow-hidden rounded bg-white/5">{item.icon_url && <img src={item.icon_url} alt="" className="h-full w-full object-cover" />}</div><span className="min-w-0 flex-1"><strong className="block truncate text-sm">{item.title}</strong><small className="text-white/35">by {item.author}</small><p className="mod-description-clamp mt-1 text-xs text-white/50">{item.description}</p></span><ArrowRight size={17} className="shrink-0 text-white/30" /></button>)}</div>}
+      </div></div>
+    </> : <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin"><div className="mx-auto max-w-5xl p-6 sm:p-10">
+      <div className="grid gap-6 border-b border-white/10 pb-7 sm:grid-cols-[96px_1fr_auto]"><div className="h-24 w-24 overflow-hidden rounded-lg bg-white/5">{project.icon_url && <img src={project.icon_url} alt="" className="h-full w-full object-cover" />}</div><div className="min-w-0"><h1 className="text-3xl font-semibold">{project.title}</h1><p className="mt-1 text-sm text-white/45">by {project.author}</p><p className="mt-4 max-w-2xl text-sm leading-6 text-white/65">{project.description}</p></div><div className="flex min-w-52 flex-col gap-2"><select value={selectedVersion} onChange={event => setSelectedVersion(event.currentTarget.value)} className="h-10 border border-white/15 bg-black px-3 text-sm outline-none">{versions.map(version => <option key={version.id} value={version.id}>{version.version_number} · {version.version_type}</option>)}</select><button onClick={install} disabled={busy || !selectedVersion} className="flex h-10 items-center justify-center gap-2 bg-white px-4 text-sm font-medium text-black disabled:opacity-40">{busy ? <Loader2 className="animate-spin" size={16} /> : <Download size={16} />}{installedProject ? selectedVersion === installedProject.versionId ? 'Repair' : 'Install version' : 'Install'}</button>{installedProject?.explicit && <button onClick={() => remove(installedProject)} disabled={busy} className="h-9 border border-red-300/20 text-xs text-red-200 hover:bg-red-950/30">Remove</button>}</div></div>
+      {!!project.gallery?.length && <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">{project.gallery.slice(0, 8).map((image, index) => <img key={`${image.url}-${index}`} src={image.url} alt={image.title || ''} className={`h-32 w-full rounded object-cover ${index === 0 ? 'col-span-2 row-span-2 sm:h-full' : ''}`} />)}</div>}
+      <div className="mt-7 grid gap-7 lg:grid-cols-[1fr_280px]"><div><h3 className="mb-3 font-medium">About</h3><div className="whitespace-pre-wrap text-sm leading-7 text-white/60">{project.body || project.description}</div></div><aside className="border border-white/10 p-4 text-xs text-white/45"><div className="mb-3 text-sm font-medium text-white">Selected version</div><div>{selected?.version_number || 'No compatible version'}</div><div className="mt-2 capitalize">{selected?.version_type}</div><div className="mt-2">{selected?.date_published ? new Date(selected.date_published).toLocaleDateString() : ''}</div><div className="mt-2">{selected?.files?.[0] ? formatBytes(selected.files[0].size) : ''}</div></aside></div>
+    </div></div>}
+  </div>;
 }
 
 function OptionalModsModal({
@@ -2254,6 +2351,10 @@ export default function App() {
               }}
               onCrashSharingChange={(serverId, preference) => void updateCrashSharing(serverId, preference)}
               onOptionalChange={updateOptionalMods}
+              onCustomModsChanged={(server, nextServers) => {
+                if (nextServers) setServers(nextServers);
+                else setServers(current => current.map(item => item.id === server.id ? server : item));
+              }}
               restriction={selectedRestriction}
               onBack={() => setSelectedId(null)}
             />

@@ -59,6 +59,7 @@ const IMPULSE_RECOGNIZED_MODS_URL = 'https://api.impulsemc.com/v1/mod-verificati
 const IMPULSE_CURSEFORGE_VERIFICATION_URL = 'https://api.impulsemc.com/v1/mod-verification/curseforge';
 const IMPULSE_BLOCKED_SERVERS_URL = 'https://api.impulsemc.com/v1/security/blocked-servers';
 const MODRINTH_VERSION_FILES_URL = 'https://api.modrinth.com/v2/version_files';
+const MODRINTH_API_URL = 'https://api.modrinth.com/v2';
 const LEGAL_DOCUMENT_VERSION = '2026-08-20.2';
 const PRIVACY_POLICY_URL = 'https://impulsemc.com/privacy/';
 const TERMS_OF_SERVICE_URL = 'https://impulsemc.com/terms/';
@@ -1514,7 +1515,12 @@ async function verifyManifestModOrigins(manifest, timeoutMs) {
     const cached = savedVerification[hash];
     if (status === 'Pending CurseForge verification' && cached && Number(cached.expiresAt) > Date.now()
       && ['Matched on Modrinth', 'Recognized by Impulse'].includes(cached.status)) status = cached.status;
-    mod.verification = { status, modrinth_status: modrinthStatus };
+    const matchedVersion = modrinth && modrinth[hash] && typeof modrinth[hash] === 'object' ? modrinth[hash] : null;
+    mod.verification = {
+      status,
+      modrinth_status: modrinthStatus,
+      ...(matchedVersion?.project_id ? { project_id: String(matchedVersion.project_id) } : {})
+    };
     if (status !== 'Pending CurseForge verification') {
       const entry = { status, expiresAt: Date.now() + (verificationStatusProblematic(status) ? 24 : 30 * 24) * 60 * 60 * 1000 };
       modVerificationCache.set(hash, entry);
@@ -1644,6 +1650,7 @@ function normalizeSavedServer(server) {
     manifestPublicKey: server?.manifestPublicKey || server?.manifest?.security?.publicKey || null,
     manifestUnsignedAllowed: server?.manifestUnsignedAllowed === true,
     outdatedImpulseWarningDismissed: server?.outdatedImpulseWarningDismissed === true,
+    customMods: Array.isArray(server?.customMods) ? server.customMods : [],
     status: server?.status || { online: false, error: SERVER_OFFLINE_MESSAGE },
     manifest: server?.manifest || { mods: [], optional_mods: [], optional_mod_categories: [] }
   };
@@ -2109,6 +2116,192 @@ async function refreshSavedServer(existing, options = {}) {
   };
 }
 
+async function modrinthRequest(route, options = {}) {
+  const response = await fetch(`${MODRINTH_API_URL}${route}`, {
+    ...options,
+    signal: options.signal || AbortSignal.timeout(Math.max(5000, getNetworkTimeout())),
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': 'ImpulseLauncher/1.3 (https://impulsemc.com)',
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.headers || {})
+    }
+  });
+  if (!response.ok) throw new Error(`Modrinth returned HTTP ${response.status}.`);
+  return response.json();
+}
+
+function modrinthChannelAllows(type, channel) {
+  if (channel === 'all') return true;
+  if (channel === 'beta') return type === 'release' || type === 'beta';
+  return type === 'release';
+}
+
+async function compatibleModrinthVersions(projectId, minecraft, channel = 'release') {
+  const params = new URLSearchParams({
+    loaders: JSON.stringify([String(minecraft.loader).toLowerCase()]),
+    game_versions: JSON.stringify([String(minecraft.version)]),
+    include_changelog: 'true'
+  });
+  const versions = await modrinthRequest(`/project/${encodeURIComponent(projectId)}/version?${params}`);
+  return (Array.isArray(versions) ? versions : [])
+    .filter((version) => modrinthChannelAllows(version.version_type, channel))
+    .sort((a, b) => new Date(b.date_published || 0) - new Date(a.date_published || 0));
+}
+
+function selectModrinthFile(version) {
+  const files = Array.isArray(version?.files) ? version.files : [];
+  const file = files.find((entry) => entry.primary) || files.find((entry) => String(entry.filename || '').toLowerCase().endsWith('.jar'));
+  const sha512 = String(file?.hashes?.sha512 || '').toLowerCase();
+  if (!file || !/^[0-9a-f]{128}$/.test(sha512)) throw new Error(`Modrinth version ${version?.version_number || version?.id || ''} has no SHA-512 jar.`);
+  return file;
+}
+
+async function resolveCustomModPlan(server, projectId, versionId, channel) {
+  const plan = new Map();
+  const resolving = new Set();
+  async function resolve(id, requestedVersionId, requiredBy = null, explicit = false) {
+    if (resolving.has(id)) throw new Error(`Modrinth dependency cycle detected at ${id}.`);
+    const existing = plan.get(id);
+    if (existing) {
+      if (requiredBy) existing.requiredBy.add(requiredBy);
+      if (explicit) existing.explicit = true;
+      return;
+    }
+    resolving.add(id);
+    let version;
+    if (requestedVersionId) {
+      version = await modrinthRequest(`/version/${encodeURIComponent(requestedVersionId)}`);
+      const loaders = (version.loaders || []).map((value) => String(value).toLowerCase());
+      if (!(version.game_versions || []).includes(server.manifest.minecraft.version) || !loaders.includes(server.manifest.minecraft.loader)) {
+        throw new Error(`${version.name || id} is not compatible with ${server.manifest.minecraft.version} ${server.manifest.minecraft.loader}.`);
+      }
+    } else {
+      version = (await compatibleModrinthVersions(id, server.manifest.minecraft, channel))[0];
+      if (!version) throw new Error(`No compatible Modrinth version was found for dependency ${id}.`);
+    }
+    const resolvedProjectId = String(version.project_id || id);
+    const project = await modrinthRequest(`/project/${encodeURIComponent(resolvedProjectId)}`);
+    const file = selectModrinthFile(version);
+    const item = {
+      projectId: resolvedProjectId,
+      versionId: version.id,
+      versionNumber: version.version_number,
+      name: project.title || project.slug || file.filename,
+      description: project.description || '',
+      iconUrl: project.icon_url || null,
+      fileName: safeManifestFileName(file.filename),
+      downloadUrl: file.url,
+      sha512: String(file.hashes.sha512).toLowerCase(),
+      sha1: file.hashes.sha1 ? String(file.hashes.sha1).toLowerCase() : null,
+      size: Number(file.size || 0),
+      explicit,
+      requiredBy: new Set(requiredBy ? [requiredBy] : []),
+      channel
+    };
+    plan.set(resolvedProjectId, item);
+    for (const dependency of version.dependencies || []) {
+      if (dependency.dependency_type !== 'required') continue;
+      let dependencyProjectId = dependency.project_id ? String(dependency.project_id) : null;
+      if (!dependencyProjectId && dependency.version_id) {
+        const dependencyVersion = await modrinthRequest(`/version/${encodeURIComponent(dependency.version_id)}`);
+        dependencyProjectId = String(dependencyVersion.project_id || '');
+      }
+      if (!dependencyProjectId) throw new Error(`${item.name} has a required dependency that Modrinth could not identify.`);
+      await resolve(dependencyProjectId, dependency.version_id || null, resolvedProjectId, false);
+    }
+    resolving.delete(id);
+  }
+  await resolve(String(projectId), versionId || null, null, true);
+  return [...plan.values()].map((item) => ({ ...item, requiredBy: [...item.requiredBy] }));
+}
+
+async function installCustomModPlan(server, plan) {
+  const existing = Array.isArray(server.customMods) ? server.customMods : [];
+  const activeServerMods = [...(server.manifest.mods || []), ...selectedOptionalMods(server)];
+  const serverFiles = new Map(activeServerMods
+    .map((mod) => [safeManifestFileName(mod.file_name).toLowerCase(), mod]));
+  const customFiles = new Map(existing.map((mod) => [String(mod.fileName).toLowerCase(), mod]));
+  for (const item of plan) {
+    const projectCollision = activeServerMods
+      .find((mod) => String(mod.verification?.project_id || '') === item.projectId);
+    if (projectCollision) throw new Error(`${item.name} is already provided by the server as ${projectCollision.file_name}.`);
+    const name = item.fileName.toLowerCase();
+    const collision = serverFiles.get(name);
+    if (collision && String(collision.sha512) !== item.sha512) throw new Error(`${item.fileName} conflicts with a mod supplied by the server.`);
+    const customCollision = customFiles.get(name);
+    if (customCollision && customCollision.projectId !== item.projectId && customCollision.sha512 !== item.sha512) {
+      throw new Error(`${item.fileName} is already used by ${customCollision.name}.`);
+    }
+  }
+  const minecraftPath = store.get('minecraftPath');
+  await ensureDirectories(minecraftPath);
+  const cache = new CacheManager(minecraftPath);
+  const profileManager = new ProfileManager(minecraftPath);
+  await createOrSyncProfile(minecraftPath, server);
+  const profileMods = path.join(profileManager.getProfileDir(server.profileId), 'mods');
+  await fs.mkdir(profileMods, { recursive: true });
+  for (const item of plan) {
+    await cache.downloadAndStore('mods', item.downloadUrl, item.sha512, '.jar', {
+      algorithm: 'sha512', timeout: getNetworkTimeout(), attempts: 3, retryDelays: [500, 1500, 3000]
+    });
+    await fs.copyFile(cache.getCachePath('mods', item.sha512, '.jar'), path.join(profileMods, item.fileName));
+  }
+  const merged = new Map(existing.map((mod) => [mod.projectId, { ...mod }]));
+  const explicitProjects = new Set(plan.filter((item) => item.explicit).map((item) => item.projectId));
+  for (const previous of merged.values()) {
+    previous.requiredBy = (previous.requiredBy || []).filter((owner) => !explicitProjects.has(owner));
+  }
+  for (const item of plan) {
+    const previous = merged.get(item.projectId);
+    if (previous && previous.fileName !== item.fileName) await fs.rm(path.join(profileMods, previous.fileName), { force: true });
+    merged.set(item.projectId, {
+      ...item,
+      explicit: item.explicit || previous?.explicit === true,
+      requiredBy: [...new Set([...(previous?.requiredBy || []), ...(item.requiredBy || [])])]
+    });
+  }
+  let removedDependency = true;
+  while (removedDependency) {
+    removedDependency = false;
+    for (const [projectId, item] of merged) {
+      if (item.explicit || (item.requiredBy || []).length) continue;
+      merged.delete(projectId);
+      await fs.rm(path.join(profileMods, safeManifestFileName(item.fileName)), { force: true });
+      for (const dependency of merged.values()) dependency.requiredBy = (dependency.requiredBy || []).filter((owner) => owner !== projectId);
+      removedDependency = true;
+    }
+  }
+  return { ...server, customMods: [...merged.values()] };
+}
+
+async function removeCustomMod(server, projectId) {
+  const mods = new Map((server.customMods || []).map((mod) => [mod.projectId, { ...mod, requiredBy: [...(mod.requiredBy || [])] }]));
+  const target = mods.get(projectId);
+  if (!target) throw new Error('Custom mod not found.');
+  target.explicit = false;
+  const removed = new Set();
+  function prune(id) {
+    const mod = mods.get(id);
+    if (!mod || mod.explicit || mod.requiredBy.length) return;
+    mods.delete(id);
+    removed.add(id);
+    for (const dependency of mods.values()) {
+      const before = dependency.requiredBy.length;
+      dependency.requiredBy = dependency.requiredBy.filter((owner) => owner !== id);
+      if (before !== dependency.requiredBy.length) prune(dependency.projectId);
+    }
+  }
+  prune(projectId);
+  const minecraftPath = store.get('minecraftPath');
+  const profileDir = new ProfileManager(minecraftPath).getProfileDir(server.profileId);
+  for (const id of removed) {
+    const mod = (server.customMods || []).find((item) => item.projectId === id);
+    if (mod) await fs.rm(path.join(profileDir, 'mods', safeManifestFileName(mod.fileName)), { force: true });
+  }
+  return { ...server, customMods: [...mods.values()] };
+}
+
 function hasUsableManifest(server) {
   return !!server?.manifest?.minecraft?.version
     && !!server?.manifest?.minecraft?.loader_version
@@ -2206,7 +2399,21 @@ async function createOrSyncProfile(minecraftPath, serverEntry) {
   const enabledOptionalMods = selectedOptionalMods(serverEntry);
   const profileMods = [
     ...(manifest.mods || []).map((mod) => ({ ...mod, required: true })),
-    ...enabledOptionalMods
+    ...enabledOptionalMods,
+    ...(serverEntry.customMods || []).map((mod) => ({
+      id: `custom:${mod.projectId}`,
+      name: mod.name,
+      description: mod.description || '',
+      file_name: mod.fileName,
+      download_url: mod.downloadUrl,
+      sha512: mod.sha512,
+      sha1: mod.sha1 || null,
+      size: mod.size || 0,
+      required: false,
+      source: 'user-custom',
+      dependencies: [],
+      conflicts: []
+    }))
   ];
   const localManifest = {
     manifest_version: manifest.manifest_version,
@@ -3255,6 +3462,68 @@ ipcMain.handle('impulse-update-optional-mods', async (_event, serverId, selectio
     return { success: true, server: updated, servers: next };
   } catch (error) {
     return { success: false, error: error.message || 'Unable to update optional mods.' };
+  }
+});
+
+ipcMain.handle('impulse-search-custom-mods', async (_event, serverId, query) => {
+  try {
+    const server = getServers().find((entry) => entry.id === serverId);
+    if (!server) return { success: false, error: 'Server not found.' };
+    const facets = [
+      ['project_type:mod'],
+      [`versions:${server.manifest.minecraft.version}`],
+      [`categories:${server.manifest.minecraft.loader}`],
+      ['client_side:required', 'client_side:optional']
+    ];
+    const params = new URLSearchParams({ query: String(query || '').trim(), limit: '30', facets: JSON.stringify(facets) });
+    const body = await modrinthRequest(`/search?${params}`);
+    return { success: true, projects: body.hits || [] };
+  } catch (error) {
+    return { success: false, error: error.message || 'Unable to search Modrinth.' };
+  }
+});
+
+ipcMain.handle('impulse-custom-mod-project', async (_event, serverId, projectId, channel = 'release') => {
+  try {
+    const server = getServers().find((entry) => entry.id === serverId);
+    if (!server) return { success: false, error: 'Server not found.' };
+    const project = await modrinthRequest(`/project/${encodeURIComponent(projectId)}`);
+    const [versions, team] = await Promise.all([
+      compatibleModrinthVersions(projectId, server.manifest.minecraft, channel),
+      project.team ? modrinthRequest(`/team/${encodeURIComponent(project.team)}/members`).catch(() => []) : []
+    ]);
+    const authors = (Array.isArray(team) ? team : [])
+      .filter((member) => member?.accepted !== false)
+      .map((member) => member?.user?.username)
+      .filter(Boolean);
+    return { success: true, project: { ...project, project_id: project.id, author: authors.join(', ') || 'Modrinth creator' }, versions };
+  } catch (error) {
+    return { success: false, error: error.message || 'Unable to load the Modrinth project.' };
+  }
+});
+
+ipcMain.handle('impulse-install-custom-mod', async (_event, serverId, projectId, versionId, channel = 'release') => {
+  try {
+    const server = getServers().find((entry) => entry.id === serverId);
+    if (!server) return { success: false, error: 'Server not found.' };
+    const plan = await resolveCustomModPlan(server, projectId, versionId || null, channel);
+    const updated = await installCustomModPlan(server, plan);
+    const saved = saveServerEntry(serverId, updated);
+    return { success: true, server: saved, servers: getServers(), installed: plan.map((item) => item.name) };
+  } catch (error) {
+    return { success: false, error: error.message || 'Unable to install the custom mod.' };
+  }
+});
+
+ipcMain.handle('impulse-remove-custom-mod', async (_event, serverId, projectId) => {
+  try {
+    const server = getServers().find((entry) => entry.id === serverId);
+    if (!server) return { success: false, error: 'Server not found.' };
+    const updated = await removeCustomMod(server, projectId);
+    const saved = saveServerEntry(serverId, updated);
+    return { success: true, server: saved, servers: getServers() };
+  } catch (error) {
+    return { success: false, error: error.message || 'Unable to remove the custom mod.' };
   }
 });
 

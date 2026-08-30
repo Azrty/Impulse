@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-import type { CrashReport, CrashShareStatus, DiscordRpcSettings, GameStorage, ImpulseInvitation, LaunchProgress, MinecraftAccount, OfflineDetails, RepairReport, RunningGame, SavedServer, User } from './types';
+import type { CrashReport, CrashShareStatus, DiscordRpcSettings, GameStorage, ImpulseInvitation, LaunchProgress, MinecraftAccount, ModrinthProject, ModrinthSearchProject, ModrinthVersion, OfflineDetails, RepairReport, RunningGame, SavedServer, User } from './types';
 
 declare global {
   interface Window {
@@ -22,6 +22,10 @@ declare global {
       consumeDeepLinks: () => Promise<ImpulseInvitation[]>;
       refreshServer: (serverId: string) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[]; details?: OfflineDetails }>;
       updateOptionalMods: (serverId: string, selections: Record<string, boolean>, markPrompted?: boolean) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
+      searchCustomMods: (serverId: string, query: string) => Promise<{ success: boolean; error?: string; projects?: ModrinthSearchProject[] }>;
+      getCustomModProject: (serverId: string, projectId: string, channel?: 'release' | 'beta' | 'all') => Promise<{ success: boolean; error?: string; project?: ModrinthProject; versions?: ModrinthVersion[] }>;
+      installCustomMod: (serverId: string, projectId: string, versionId?: string | null, channel?: 'release' | 'beta' | 'all') => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[]; installed?: string[] }>;
+      removeCustomMod: (serverId: string, projectId: string) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
       dismissOutdatedVersionWarning: (serverId: string) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
       acceptUnverifiedMods: (serverId: string, signature: string) => Promise<{ success: boolean; error?: string; server?: SavedServer; servers?: SavedServer[] }>;
       respondCrashSharing: (reportId: string, share: boolean, remember?: boolean) => Promise<{ success: boolean; error?: string; shared?: boolean; servers?: SavedServer[] }>;

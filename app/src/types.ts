@@ -16,6 +16,7 @@ export interface ImpulseMod {
   verification?: {
     status: 'Matched on Modrinth' | 'Matched on CurseForge' | 'Recognized by Impulse' | 'Pending CurseForge verification' | 'Incompatible Modrinth listing' | 'Incompatible CurseForge listing' | 'Unverified' | 'Verification unavailable';
     modrinth_status?: string;
+    project_id?: string;
   };
 }
 
@@ -120,9 +121,42 @@ export interface SavedServer {
   crashReportSharing?: 'ask' | 'always' | 'never';
   outdatedImpulseWarningDismissed?: boolean;
   acceptedUnverifiedModSignature?: string | null;
+  customMods?: CustomLauncherMod[];
   addedAt: string;
   updatedAt: string;
   profileId: string;
+}
+
+export interface CustomLauncherMod {
+  projectId: string;
+  versionId: string;
+  versionNumber: string;
+  name: string;
+  description: string;
+  iconUrl?: string | null;
+  fileName: string;
+  downloadUrl: string;
+  sha512: string;
+  sha1?: string | null;
+  size: number;
+  explicit: boolean;
+  requiredBy: string[];
+  channel: 'release' | 'beta' | 'all';
+}
+
+export interface ModrinthSearchProject {
+  project_id: string; slug: string; title: string; description: string; author: string;
+  icon_url?: string | null; downloads?: number; latest_version?: string;
+}
+
+export interface ModrinthProject extends ModrinthSearchProject {
+  body?: string; gallery?: { url: string; title?: string; description?: string; featured?: boolean }[];
+  license?: { name?: string }; client_side?: string;
+}
+
+export interface ModrinthVersion {
+  id: string; name: string; version_number: string; version_type: string; date_published: string;
+  changelog?: string; files?: { filename: string; size: number; primary?: boolean }[];
 }
 
 export interface User {

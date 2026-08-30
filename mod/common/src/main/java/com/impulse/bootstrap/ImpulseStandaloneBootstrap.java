@@ -46,12 +46,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
@@ -80,9 +82,8 @@ public final class ImpulseStandaloneBootstrap {
     private static final Pattern MOTD_PORT = Pattern.compile("\\[impulse:(\\d{1,5})]", Pattern.CASE_INSENSITIVE);
     private static final Pattern TEXT_PORT = Pattern.compile("(?:impulse[-_\\s]*(?:manifest[-_\\s]*)?|manifest[-_\\s]*)port\\s*[:=]\\s*(\\d{1,5})", Pattern.CASE_INSENSITIVE);
     private static final Pattern TOML_MOD_ID = Pattern.compile("(?m)^\\s*modId\\s*=\\s*[\"']([^\"']+)[\"']");
-    private static final String UI_BUNDLE_VERSION = "webview-1";
-    private static final long UI_READY_TIMEOUT_MS = 60000L;
-    private static final long UI_HEARTBEAT_TIMEOUT_MS = 60000L;
+    private static final String UI_BUNDLE_VERSION = "webview-2";
+    private static final long UI_READY_TIMEOUT_MS = 65000L;
     private static volatile ProgressReporter progressReporter = ProgressReporter.NONE;
     private static volatile boolean skippedGlobalRestoreHookRegistered;
     private static volatile JsonObject blockedServersCache;
@@ -118,6 +119,8 @@ public final class ImpulseStandaloneBootstrap {
             request.loader_version = clean(loaderVersion, "");
             request.session_directory = sessionDirectory.getAbsolutePath();
             request.assets_directory = bundle.assetsDirectory.getAbsolutePath();
+            request.parent_pid = currentProcessId();
+            request.impulse_version = currentImpulseVersion();
             File requestFile = new File(sessionDirectory, "request.json");
             writeTextAtomic(requestFile, GSON.toJson(request));
 
@@ -143,7 +146,6 @@ public final class ImpulseStandaloneBootstrap {
             process = processBuilder.start();
 
             File ready = new File(sessionDirectory, "ready");
-            File heartbeat = new File(sessionDirectory, "heartbeat");
             File resultFile = new File(sessionDirectory, "result.json");
             long started = System.currentTimeMillis();
             long readyAt = 0L;
@@ -174,22 +176,54 @@ public final class ImpulseStandaloneBootstrap {
                     System.err.println("[Impulse] Standalone selector did not create a window within 60 seconds.");
                     return nativeUiFailureOutcome(gameDirectory);
                 }
-                if (readyAt > 0L) {
-                    long heartbeatAt = heartbeat.isFile() ? heartbeat.lastModified() : readyAt;
-                    if (now - heartbeatAt > UI_HEARTBEAT_TIMEOUT_MS) {
-                        System.err.println("[Impulse] Standalone selector stopped responding.");
-                        return nativeUiFailureOutcome(gameDirectory);
-                    }
-                }
                 Thread.sleep(200L);
             }
         } catch (Throwable error) {
             System.err.println("[Impulse] Standalone selector failed: " + error.getMessage());
             return nativeUiFailureOutcome(gameDirectory);
         } finally {
-            if (process != null && process.isAlive()) process.destroyForcibly();
+            stopUiProcess(process);
             if (sessionDirectory != null) deleteTree(sessionDirectory);
             progressReporter.end();
+        }
+    }
+
+    private static void stopUiProcess(Process process) {
+        if (process == null || !process.isAlive()) return;
+        try {
+            // A successful UI action schedules native WebView termination. Give it time to
+            // unwind WKWebView/WebView2/WebKitGTK and release its bridge callbacks first.
+            if (process.waitFor(5L, TimeUnit.SECONDS)) return;
+            process.destroy();
+            if (process.waitFor(2L, TimeUnit.SECONDS)) return;
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        }
+        if (process.isAlive()) process.destroyForcibly();
+    }
+
+    private static long currentProcessId() {
+        try {
+            String runtimeName = java.lang.management.ManagementFactory.getRuntimeMXBean().getName();
+            int separator = runtimeName.indexOf('@');
+            return Long.parseLong(separator < 0 ? runtimeName : runtimeName.substring(0, separator));
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private static String currentImpulseVersion() {
+        InputStream input = null;
+        try {
+            input = ImpulseStandaloneBootstrap.class.getResourceAsStream("/impulse-version.properties");
+            if (input == null) return clean(System.getProperty("impulse.version"), "unknown");
+            Properties properties = new Properties();
+            properties.load(input);
+            return clean(properties.getProperty("version"), "unknown");
+        } catch (Exception ignored) {
+            return clean(System.getProperty("impulse.version"), "unknown");
+        } finally {
+            if (input != null) try { input.close(); } catch (IOException ignored) { }
         }
     }
 
@@ -1964,6 +1998,8 @@ public final class ImpulseStandaloneBootstrap {
         public String loader_version;
         public String session_directory;
         public String assets_directory;
+        public long parent_pid;
+        public String impulse_version;
     }
 
     public static final class UiResult {

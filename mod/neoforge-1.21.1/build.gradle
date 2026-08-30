@@ -98,6 +98,7 @@ tasks.named('jar', Jar).configure {
     include 'com/impulse/bootstrap/**'
     include 'META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator'
     include 'impulse-runtime.embedded'
+    include 'impulse-version.properties'
     include '*-runtime.jar'
     include 'impulse-standalone-ui/**'
     include '*.jar'
@@ -130,6 +131,9 @@ tasks.named('processResources', ProcessResources).configure {
     dependsOn generateMusicPresenceFont
     inputs.property 'version', project.version
     filesMatching('META-INF/neoforge.mods.toml') {
+        expand 'version': project.version
+    }
+    filesMatching('impulse-version.properties') {
         expand 'version': project.version
     }
 }

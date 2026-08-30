@@ -23,13 +23,22 @@ def webDirectory = file('web')
 def webDist = file('web/dist')
 def webGeneratedAssets = file('web/src/generated')
 def impulseLogo = file('../../app/assets/icon-mono.png')
+def onboardingBackground = file('../neoforge-1.21.1/src/main/resources/assets/impulse/textures/gui/menu/bg_000.jpg')
 
 tasks.register('prepareWebAssets', Copy) {
     from impulseLogo
+    from(onboardingBackground) {
+        rename { 'onboarding-background.jpg' }
+    }
     into webGeneratedAssets
-    rename { 'impulse-logo.png' }
-    inputs.file impulseLogo
-    outputs.file file('web/src/generated/impulse-logo.png')
+    eachFile { details ->
+        if (details.name == impulseLogo.name) details.name = 'impulse-logo.png'
+    }
+    inputs.files(impulseLogo, onboardingBackground)
+    outputs.files(
+        file('web/src/generated/impulse-logo.png'),
+        file('web/src/generated/onboarding-background.jpg')
+    )
 }
 
 tasks.register('installWebDependencies', Exec) {
