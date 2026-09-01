@@ -4,6 +4,7 @@ import {
   Flag, Globe2, History, ImageOff, LoaderCircle, LockKeyhole, MoreHorizontal, Package, PackagePlus, Play, Plus,
   RefreshCw, Rocket, ScanSearch, Search, Server, Settings2, ShieldCheck, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react';
+import eruda from 'eruda';
 import { heartbeat, invoke } from './bridge';
 import impulseLogo from './generated/impulse-logo.png';
 import type { CustomMod, GlobalMod, InstallPlan, Manifest, Mod, Operation, Profile, Project, SearchProject, State, UpdatePublication, UpdateSection, Version } from './types';
@@ -11,6 +12,22 @@ import type { CustomMod, GlobalMod, InstallPlan, Manifest, Mod, Operation, Profi
 type Tab = 'overview' | 'mods';
 type ModView = 'installed' | 'search' | 'project' | 'versions';
 type Warning = { mods: Mod[]; signature: string };
+
+let developerToolsInitialized = false;
+function showDeveloperTools() {
+  if (!developerToolsInitialized) {
+    eruda.init({ defaults: { displaySize: 55, transparency: 0.96 } });
+    developerToolsInitialized = true;
+  }
+  eruda.show();
+}
+
+function hideDeveloperTools() {
+  if (!developerToolsInitialized) return;
+  eruda.hide();
+  eruda.destroy();
+  developerToolsInitialized = false;
+}
 
 const fmtBytes = (value = 0) => {
   if (value < 1024) return `${value} B`;
@@ -61,6 +78,7 @@ export function App() {
   const [modManagerOpen, setModManagerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newsOpen, setNewsOpen] = useState(false);
+  const [developerToolsOpen, setDeveloperToolsOpen] = useState(false);
   const pollRef = useRef<number | undefined>(undefined);
   const updatesRefreshed = useRef(false);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -76,6 +94,42 @@ export function App() {
     const id = window.setInterval(heartbeat, 5000);
     return () => window.clearInterval(id);
   }, [loadState]);
+
+  const toggleDeveloperTools = useCallback(() => {
+    setDeveloperToolsOpen(open => {
+      if (open) hideDeveloperTools();
+      else showDeveloperTools();
+      return !open;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!state?.developer_tools_enabled) return;
+    const handleToolsShortcut = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      const inspectShortcut = event.key === 'F12' || event.code === 'F12'
+        || ((key === 'i' || event.code === 'KeyI') && event.ctrlKey && event.shiftKey)
+        || ((key === 'i' || event.code === 'KeyI') && event.metaKey && (event.altKey || event.shiftKey));
+      const closeShortcut = event.key === 'Escape' && developerToolsOpen;
+      if (!inspectShortcut && !closeShortcut) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (closeShortcut) {
+        hideDeveloperTools();
+        setDeveloperToolsOpen(false);
+      } else {
+        toggleDeveloperTools();
+      }
+    };
+    window.addEventListener('keydown', handleToolsShortcut, true);
+    return () => window.removeEventListener('keydown', handleToolsShortcut, true);
+  }, [developerToolsOpen, state?.developer_tools_enabled, toggleDeveloperTools]);
+
+  useEffect(() => {
+    if (state?.developer_tools_enabled || !developerToolsOpen) return;
+    hideDeveloperTools();
+    setDeveloperToolsOpen(false);
+  }, [developerToolsOpen, state?.developer_tools_enabled]);
 
   useEffect(() => {
     if (!state?.legal_accepted || updatesRefreshed.current) return;
@@ -237,7 +291,7 @@ export function App() {
         <aside className="server-rail">
           <div className="rail-label">Servers</div>
           <div className="server-list">
-            {state.profiles.map(item => <ServerRow key={item.id} profile={item} selected={item.id === profile?.id} onClick={() => selectProfile(item.id)} />)}
+            {state.profiles.map(item => <ServerRow key={item.id} profile={item} iconUrl={state.profile_icons?.[item.id]} selected={item.id === profile?.id} onClick={() => selectProfile(item.id)} />)}
             {!state.profiles.length && <div className="empty-rail">Your servers will appear here.</div>}
           </div>
           <button className="add-server" onClick={() => setAdding(true)}><Plus size={17} /> Add server</button>
@@ -286,7 +340,7 @@ export function App() {
       {optionalOpen && profile && manifest && <OptionalMods profile={profile} manifest={manifest} onClose={() => setOptionalOpen(false)} onSave={ids => { setOptionalOpen(false); start('optional', { profile_id: profile.id, ids }); }} />}
       {warning && <VerificationWarning warning={warning} onCancel={() => setWarning(undefined)} onContinue={() => { setWarning(undefined); launch(true); }} />}
       {modManagerOpen && profile && <ModManager profile={profile} state={state} start={start} operation={operation} onClose={async () => { setModManagerOpen(false); await loadState(); }} />}
-      {settingsOpen && <StandaloneSettings state={state} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onNews={() => { setSettingsOpen(false); setNewsOpen(true); }} />}
+      {settingsOpen && <StandaloneSettings state={state} developerToolsOpen={developerToolsOpen} onToggleDeveloperTools={toggleDeveloperTools} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onNews={() => { setSettingsOpen(false); setNewsOpen(true); }} />}
       {newsOpen && <NewsHistory publications={state.publications || []} currentVersion={state.impulse_version} dismissed={state.dismissed_update_ids || []} onClose={() => setNewsOpen(false)} />}
     </div>
   );
@@ -356,12 +410,13 @@ function NewsHistory({ publications, currentVersion, dismissed, onClose }: { pub
   return <div className="news-history-layer"><WhatsNew publication={publication} mode="history" onClose={onClose} onPrevious={index > 0 ? () => setIndex(value => value - 1) : undefined} onNext={index < publications.length - 1 ? () => setIndex(value => value + 1) : undefined} position={`${index + 1} of ${publications.length}${publication.versions.includes(currentVersion) ? ' · This version' : ''}${dismissed.includes(publication.id) ? ' · Read' : ''}`} /></div>;
 }
 
-function StandaloneSettings({ state, onClose, onChange, onReplay, onNews }: { state: State; onClose: () => void; onChange: (state: State) => void; onReplay: () => void; onNews: () => void }) {
-  return <div className="modal-backdrop"><div className="modal settings-modal"><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">Impulse Standalone</span><h2>Settings</h2><p>Manage how this standalone installation behaves.</p><section className="settings-section"><div><strong>Update channel</strong><small>Stable receives production releases. Beta also receives previews.</small></div><div className="segments">{(['stable', 'beta'] as const).map(channel => <button key={channel} className={state.update_channel === channel ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setUpdateChannel', { channel }))}>{channel}</button>)}</div></section><section className="settings-section"><div><strong>What’s new</strong><small>Read current and previous standalone update notes.</small></div><button className="secondary" onClick={onNews}><History /> Open</button></section><section className="settings-section"><div><strong>Onboarding</strong><small>Replay the introduction to Impulse Standalone.</small></div><button className="secondary" onClick={onReplay}><Rocket /> Replay</button></section><footer className="settings-about"><span>Installed version</span><strong>{state.impulse_version}</strong></footer></div></div>;
+function StandaloneSettings({ state, developerToolsOpen, onToggleDeveloperTools, onClose, onChange, onReplay, onNews }: { state: State; developerToolsOpen: boolean; onToggleDeveloperTools: () => void; onClose: () => void; onChange: (state: State) => void; onReplay: () => void; onNews: () => void }) {
+  return <div className="modal-backdrop"><div className="modal settings-modal"><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">Impulse Standalone</span><h2>Settings</h2><p>Manage how this standalone installation behaves.</p><section className="settings-section"><div><strong>Update channel</strong><small>Stable receives production releases. Beta also receives previews.</small></div><div className="segments">{(['stable', 'beta'] as const).map(channel => <button key={channel} className={state.update_channel === channel ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setUpdateChannel', { channel }))}>{channel}</button>)}</div></section><section className="settings-section"><div><strong>Developer tools</strong><small>{state.developer_tools_enabled ? 'Toggle with F12, Ctrl+Shift+I, or Cmd+Option+I. Press Escape to close.' : 'Enable the embedded inspector and its keyboard shortcuts.'}</small></div><div className="settings-tools-actions"><div className="segments"><button className={!state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: false }))}>Off</button><button className={state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: true }))}>On</button></div>{state.developer_tools_enabled && <button className="secondary" onClick={onToggleDeveloperTools}>{developerToolsOpen ? 'Close' : 'Open'}</button>}</div></section><section className="settings-section"><div><strong>What’s new</strong><small>Read current and previous standalone update notes.</small></div><button className="secondary" onClick={onNews}><History /> Open</button></section><section className="settings-section"><div><strong>Onboarding</strong><small>Replay the introduction to Impulse Standalone.</small></div><button className="secondary" onClick={onReplay}><Rocket /> Replay</button></section><footer className="settings-about"><span>Installed version</span><strong>{state.impulse_version}</strong></footer></div></div>;
 }
 
-function ServerRow({ profile, selected, onClick }: { profile: Profile; selected: boolean; onClick: () => void }) {
-  return <button className={`server-row ${selected ? 'selected' : ''}`} onClick={onClick}><span className="server-icon"><Server /></span><span><strong>{profile.name || 'Minecraft Server'}</strong><small>{profile.address}</small></span><i /></button>;
+function ServerRow({ profile, iconUrl, selected, onClick }: { profile: Profile; iconUrl?: string; selected: boolean; onClick: () => void }) {
+  const icon = useNativeImage(iconUrl);
+  return <button className={`server-row ${selected ? 'selected' : ''}`} onClick={onClick}><span className="server-icon">{icon ? <img src={icon} alt="" /> : <Server />}</span><span><strong>{profile.name || 'Minecraft Server'}</strong><small>{profile.address}</small></span><i /></button>;
 }
 
 function EmptyServer({ onAdd }: { onAdd: () => void }) {
@@ -371,7 +426,11 @@ function EmptyServer({ onAdd }: { onAdd: () => void }) {
 function ServerHero({ profile, manifest }: { profile: Profile; manifest?: Manifest }) {
   const banner = useNativeImage(manifest?.banner_url);
   const icon = useNativeImage(manifest?.icon_url);
-  return <div className="server-hero" style={banner ? { backgroundImage: `linear-gradient(90deg, rgba(4,4,4,.82), rgba(4,4,4,.22)), url(${banner})` } : undefined}><div className="hero-noise" /><div className="hero-details">{icon ? <img src={icon} alt="" /> : <span className="hero-icon"><Server /></span>}<div><h1>{manifest?.name || profile.name || 'Minecraft Server'}</h1><p>{profile.address}</p><div className="hero-meta"><span><i className="online" /> Ready</span><span>{manifest?.minecraft?.version || 'Minecraft'}</span><span>{manifest?.minecraft?.loader || 'NeoForge'} {manifest?.minecraft?.loader_version}</span></div></div></div></div>;
+  const [videoFailed, setVideoFailed] = useState(false);
+  const video = manifest?.video_background_url;
+  useEffect(() => setVideoFailed(false), [video]);
+  const showVideo = Boolean(video && !videoFailed);
+  return <div className="server-hero" style={!showVideo && banner ? { backgroundImage: `linear-gradient(90deg, rgba(4,4,4,.82), rgba(4,4,4,.22)), url(${banner})` } : undefined}>{showVideo && <video className="hero-video" src={video} autoPlay muted loop playsInline onError={() => setVideoFailed(true)} />}<div className="hero-shade" /><div className="hero-noise" /><div className="hero-details">{icon ? <img src={icon} alt="" /> : <span className="hero-icon"><Server /></span>}<div><h1>{manifest?.name || profile.name || 'Minecraft Server'}</h1><p>{profile.address}</p><div className="hero-meta"><span><i className="online" /> Ready</span><span>{manifest?.minecraft?.version || 'Minecraft'}</span><span>{manifest?.minecraft?.loader || 'NeoForge'} {manifest?.minecraft?.loader_version}</span></div></div></div></div>;
 }
 
 function Overview({ manifest }: { manifest?: Manifest }) {

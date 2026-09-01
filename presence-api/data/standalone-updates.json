@@ -2,23 +2,19 @@
   "schema_version": 1,
   "publications": [
     {
-      "id": "we-fixed-impulse",
+      "id": "new-ui-impulse",
       "title": "We fixed Impulse!",
       "subtitle": "A faster, cleaner and more reliable standalone experience.",
       "versions": [
-        "1.3.0-beta.1",
-        "1.3.0-beta.2",
-        "1.3.0-beta.3",
-        "1.3.0-beta.4",
         "1.3.0"
       ],
-      "published_at": "2026-08-30T00:00:00Z",
+      "published_at": "2026-08-31T00:00:00Z",
       "hero_image_url": null,
       "sections": [
         {
           "icon": "sparkles",
           "title": "A completely new interface",
-          "body": "Impulse Standalone now uses a sharp and responsive native WebView experience built around your servers."
+          "body": "Impulse Standalone now gives you a cleaner, easier way to choose a server and start playing."
         },
         {
           "icon": "shield-check",

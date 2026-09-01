@@ -12,6 +12,7 @@ import dev.webview.Webview;
 import com.sun.jna.Library;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
+import com.sun.jna.Structure;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -44,6 +45,10 @@ import java.util.concurrent.TimeUnit;
 
 /** WebView standalone profile selector launched before NeoForge mod discovery. */
 public final class ImpulseStandaloneUi {
+    private static final int MIN_WINDOW_WIDTH = 760;
+    private static final int MIN_WINDOW_HEIGHT = 520;
+    private static final int INITIAL_WINDOW_WIDTH = 1100;
+    private static final int INITIAL_WINDOW_HEIGHT = 700;
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final int MAX_IMAGE_BYTES = 6 * 1024 * 1024;
     private static final int MAX_FRONTEND_BYTES = 8 * 1024 * 1024;
@@ -75,6 +80,7 @@ public final class ImpulseStandaloneUi {
     private volatile Webview webview;
     private volatile boolean webviewRunning;
     private volatile boolean frontendReady;
+    private volatile boolean developerToolsActive;
     private volatile ImpulseStandaloneBootstrap.RestrictedServerException currentRestriction;
     private volatile UpdateRegistry updateRegistry;
 
@@ -118,12 +124,21 @@ public final class ImpulseStandaloneUi {
             String frontendUrl = frontend.toURI().toASCIIString();
             System.out.println("[Impulse UI] WebView backend: " + webviewBackend());
             System.out.println("[Impulse UI] Standalone frontend: " + frontend.getAbsolutePath() + " (" + frontend.length() + " bytes)");
-            window = new Webview(Boolean.getBoolean("impulse.ui.debug"));
+            developerToolsActive = Boolean.getBoolean("impulse.ui.debug") || developerToolsEnabled();
+            window = new Webview(developerToolsActive);
             this.webview = window;
             startParentWatchdog();
             window.setTitle("Impulse - Choose a server");
-            window.setMinSize(760, 520);
-            window.setSize(1180, 760);
+            if (isWindows()) {
+                Webview windowsWindow = window;
+                applyWindowsWindowSize(windowsWindow);
+                window.dispatch(() -> applyWindowsWindowSize(windowsWindow));
+            } else {
+                window.setMinSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+                window.setSize(INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT);
+            }
+            System.out.println("[Impulse UI] Requested logical window size: " + INITIAL_WINDOW_WIDTH + "x" + INITIAL_WINDOW_HEIGHT + ".");
+            System.out.println("[Impulse UI] Developer tools: " + (developerToolsActive ? "enabled" : "disabled") + ".");
             window.bind("impulseBridge", this::bridge);
             System.out.println("[Impulse UI] Navigating to " + frontendUrl);
             window.loadURL(frontendUrl);
@@ -148,7 +163,10 @@ public final class ImpulseStandaloneUi {
             imageJobs.clear();
             System.out.println("[Impulse UI] Standalone WebView cleanup complete.");
         }
-        if (!completed) writeResult(legalAccepted ? "fallback" : "quit", null, null);
+        // Reaching this point without a completed action means the user closed the
+        // native selector window. Treat that as an explicit quit so the waiting
+        // Minecraft process exits instead of continuing with the in-game fallback.
+        if (!completed) writeResult("quit", null, null);
     }
 
     private void startParentWatchdog() {
@@ -176,7 +194,7 @@ public final class ImpulseStandaloneUi {
             catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return; }
             if (frontendReady || completed || webview == null) return;
             System.err.println("[Impulse UI] React frontend did not become ready within 60 seconds; closing the WebView.");
-            writeResult(legalAccepted ? "fallback" : "quit", null,
+            writeResult("quit", null,
                 new IOException("The standalone web interface did not become ready."));
             completed = true;
             closeWindow();
@@ -243,6 +261,10 @@ public final class ImpulseStandaloneUi {
             setUpdateChannel(string(command, "channel"));
             return state();
         }
+        if ("setDeveloperTools".equals(action)) {
+            setDeveloperToolsEnabled(bool(command, "enabled"));
+            return state();
+        }
         if ("completeOnboarding".equals(action)) {
             setOnboardingVersion(1);
             return state();
@@ -271,8 +293,7 @@ public final class ImpulseStandaloneUi {
             return true;
         }
         if ("fallback".equals(action)) {
-            if (!legalAccepted) throw new IOException("The Privacy Policy and Terms must be accepted first.");
-            writeResult("fallback", null, null);
+            writeResult("quit", null, null);
             completed = true;
             closeWindow();
             return true;
@@ -307,10 +328,20 @@ public final class ImpulseStandaloneUi {
         state.put("privacy_url", ImpulseStandaloneBootstrap.PRIVACY_POLICY_URL);
         state.put("terms_url", ImpulseStandaloneBootstrap.TERMS_OF_SERVICE_URL);
         state.put("profiles", store.profiles == null ? Collections.emptyList() : store.profiles);
+        Map<String, String> profileIcons = new LinkedHashMap<String, String>();
+        if (store.profiles != null) {
+            for (ImpulseStandaloneBootstrap.Profile profile : store.profiles) {
+                ImpulseStandaloneBootstrap.Manifest cached = ImpulseStandaloneBootstrap.loadCachedManifest(gameDirectory, profile);
+                if (cached != null && cached.icon_url != null && !cached.icon_url.trim().isEmpty()) profileIcons.put(profile.id, cached.icon_url);
+            }
+        }
+        state.put("profile_icons", profileIcons);
         state.put("active_profile_id", store.active_profile_id);
         state.put("selected_profile", selected);
         state.put("manifest", manifest);
         state.put("update_channel", loadUpdateChannel());
+        state.put("developer_tools_enabled", developerToolsEnabled());
+        state.put("developer_tools_active", developerToolsActive);
         state.put("impulse_version", clean(request.impulse_version, "unknown"));
         state.put("onboarding_completed", loadOnboardingVersion() >= 1);
         state.put("dismissed_update_ids", dismissedUpdateIds());
@@ -619,7 +650,8 @@ public final class ImpulseStandaloneUi {
         URI uri;
         try { uri = URI.create(source); }
         catch (Exception error) { throw new IOException("Invalid image URL."); }
-        if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) throw new IOException("Only HTTPS images are allowed.");
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+        if (!("http".equals(scheme) || "https".equals(scheme)) || uri.getHost() == null) throw new IOException("Only HTTP or HTTPS images are allowed.");
         String key = imageCacheFile(source).getName();
         ImageJob existing = imageJobs.get(key);
         if (existing != null) return existing;
@@ -638,7 +670,7 @@ public final class ImpulseStandaloneUi {
         try { uri = URI.create(source); }
         catch (Exception error) { throw new IOException("Invalid image URL."); }
         String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
-        if (!"https".equals(scheme)) throw new IOException("Only HTTPS images are allowed.");
+        if (!("http".equals(scheme) || "https".equals(scheme))) throw new IOException("Only HTTP or HTTPS images are allowed.");
         String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
         if (host.isEmpty()) throw new IOException("The image host is invalid.");
 
@@ -782,6 +814,42 @@ public final class ImpulseStandaloneUi {
         catch (Throwable error) { System.err.println("[Impulse UI] Could not enable per-monitor DPI awareness: " + error.getMessage()); }
     }
 
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+    }
+
+    private static void applyWindowsWindowSize(Webview window) {
+        try {
+            Pointer nativeWindow = Pointer.createConstant(window.getNativeWindowPointer());
+            int dpi = Math.max(96, WindowsUser32.INSTANCE.GetDpiForWindow(nativeWindow));
+            double scale = dpi / 96.0;
+            int minWidth = (int) Math.round(MIN_WINDOW_WIDTH * scale);
+            int minHeight = (int) Math.round(MIN_WINDOW_HEIGHT * scale);
+            int width = (int) Math.round(INITIAL_WINDOW_WIDTH * scale);
+            int height = (int) Math.round(INITIAL_WINDOW_HEIGHT * scale);
+
+            WindowsRect workArea = new WindowsRect();
+            if (WindowsUser32.INSTANCE.SystemParametersInfoW(0x0030, 0, workArea, 0)) {
+                workArea.read();
+                int margin = (int) Math.round(24 * scale);
+                int availableWidth = Math.max(1, workArea.right - workArea.left - margin * 2);
+                int availableHeight = Math.max(1, workArea.bottom - workArea.top - margin * 2);
+                minWidth = Math.min(minWidth, availableWidth);
+                minHeight = Math.min(minHeight, availableHeight);
+                width = Math.min(width, availableWidth);
+                height = Math.min(height, availableHeight);
+            }
+
+            window.setMinSize(minWidth, minHeight);
+            window.setSize(Math.max(minWidth, width), Math.max(minHeight, height));
+            System.out.println("[Impulse UI] Windows DPI: " + dpi + " (" + Math.round(scale * 100) + "%), native window size: " + Math.max(minWidth, width) + "x" + Math.max(minHeight, height) + ".");
+        } catch (Throwable error) {
+            System.err.println("[Impulse UI] Could not apply DPI-aware window size: " + error.getMessage());
+            window.setMinSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+            window.setSize(INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT);
+        }
+    }
+
     private File extractFrontend() throws IOException {
         File assetsDirectory = new File(request.assets_directory);
         File bundleRoot = assetsDirectory.getParentFile();
@@ -889,6 +957,17 @@ public final class ImpulseStandaloneUi {
         String normalized = "beta".equalsIgnoreCase(channel) ? "beta" : "stable";
         JsonObject settings = loadStandaloneSettings();
         settings.addProperty("update_channel", normalized);
+        writeJsonAtomic(standaloneSettingsFile(), settings);
+    }
+
+    private boolean developerToolsEnabled() {
+        JsonObject settings = loadStandaloneSettings();
+        return bool(settings, "developer_tools");
+    }
+
+    private void setDeveloperToolsEnabled(boolean enabled) throws IOException {
+        JsonObject settings = loadStandaloneSettings();
+        settings.addProperty("developer_tools", enabled);
         writeJsonAtomic(standaloneSettingsFile(), settings);
     }
 
@@ -1149,6 +1228,16 @@ public final class ImpulseStandaloneUi {
         WindowsUser32 INSTANCE = Native.load("user32", WindowsUser32.class);
         boolean SetProcessDpiAwarenessContext(Pointer context);
         boolean SetProcessDPIAware();
+        int GetDpiForWindow(Pointer window);
+        boolean SystemParametersInfoW(int action, int parameter, WindowsRect result, int flags);
+    }
+
+    @Structure.FieldOrder({ "left", "top", "right", "bottom" })
+    public static final class WindowsRect extends Structure {
+        public int left;
+        public int top;
+        public int right;
+        public int bottom;
     }
 
     private interface WindowsShcore extends Library {

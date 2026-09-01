@@ -299,7 +299,9 @@ const ImpulseManager = () => {
         if (!server) return;
         setRefreshing(true);
         try {
-            const { data } = await http.get(apiPath(server, '/overview'));
+            // The first scan streams and hashes every uncached jar through Wings.
+            // Keep the request alive for large modpacks; later scans are cached.
+            const { data } = await http.get(apiPath(server, '/overview'), { timeout: 300000 });
             setOverview(data);
             if (resetForms) {
                 setConfig(data.impulse?.properties || {});

@@ -19,6 +19,10 @@ class ImpulseManagerController extends ClientApiController
     public function overview(Request $request, Server $server): JsonResponse
     {
         $this->manager->authorize($request->user(), $server);
+        // A first inventory pass must stream and hash every uncached jar from
+        // Wings. Large modpacks can legitimately take longer than PHP's usual
+        // request limit; subsequent loads use the persisted metadata cache.
+        if (function_exists('set_time_limit')) @set_time_limit(300);
         return new JsonResponse($this->manager->overview($server));
     }
 

@@ -69,10 +69,14 @@ class ImpulseManagerService
     public function overview(Server $server): array
     {
         $this->ensureImpulseDirectories($server);
-        $state = $this->hydrateManagedMetadata($server, $this->state($server));
+        $state = $this->state($server);
         $runtime = $this->detectRuntime($server);
         $categories = $this->categories($server);
         [$state, $inventory] = $this->autoManageRecognizedJars($server, $state, $categories);
+        // The batch hash lookup above upgrades most legacy records at once.
+        // Hydrate only anything still incomplete instead of issuing two remote
+        // requests per managed mod before inventory discovery has run.
+        $state = $this->hydrateManagedMetadata($server, $state);
         $mods = $this->mods($server, $state, $categories, $runtime);
         $properties = $this->properties($server);
 
@@ -939,7 +943,11 @@ class ImpulseManagerService
         if ($policy === 'pinned') return null;
         if (($entry['source'] ?? '') !== 'modrinth' || empty($entry['project_id']) || empty($runtime['loader']) || empty($runtime['minecraftVersion'])) return null;
         try {
-            $versions = $this->modrinth->versions($entry['project_id'], $runtime['minecraftVersion'], $runtime['loader']);
+            // Overview rendering must not perform one network request per mod.
+            // Version lists fetched by browse/update actions populate this cache;
+            // a later overview can then display the badge at no added latency.
+            $versions = $this->modrinth->cachedVersions($entry['project_id'], $runtime['minecraftVersion'], $runtime['loader']);
+            if ($versions === null) return null;
             $allowed = match ($policy) {
                 'alpha' => ['release', 'beta', 'alpha'],
                 'beta' => ['release', 'beta'],

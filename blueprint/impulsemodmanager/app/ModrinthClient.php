@@ -9,7 +9,7 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
 class ModrinthClient
 {
     private const BASE_URL = 'https://api.modrinth.com/v2';
-    private const USER_AGENT = 'ImpulseModManager/0.3.1 (https://impulse.epivalent.com)';
+    private const USER_AGENT = 'ImpulseModManager/0.3.2 (https://impulse.epivalent.com)';
     private const RETRYABLE_STATUSES = [429, 500, 502, 503, 504];
 
     public function search(string $query, string $minecraftVersion, string $loader): array
@@ -32,7 +32,7 @@ class ModrinthClient
 
     public function versions(string $project, string $minecraftVersion, string $loader): array
     {
-        $key = 'impulsemodmanager:versions:' . sha1($project . $minecraftVersion . $loader);
+        $key = $this->versionsCacheKey($project, $minecraftVersion, $loader);
         return Cache::remember($key, now()->addMinutes(10), function () use ($project, $minecraftVersion, $loader) {
             return $this->request('/project/' . rawurlencode($project) . '/version', [
                 'game_versions' => json_encode([$minecraftVersion]),
@@ -40,6 +40,17 @@ class ModrinthClient
                 'include_changelog' => 'true',
             ]);
         });
+    }
+
+    public function cachedVersions(string $project, string $minecraftVersion, string $loader): ?array
+    {
+        $versions = Cache::get($this->versionsCacheKey($project, $minecraftVersion, $loader));
+        return is_array($versions) ? $versions : null;
+    }
+
+    private function versionsCacheKey(string $project, string $minecraftVersion, string $loader): string
+    {
+        return 'impulsemodmanager:versions:' . sha1($project . $minecraftVersion . $loader);
     }
 
     public function version(string $version): array

@@ -3,7 +3,7 @@ info:
   identifier: "impulsemodmanager"
   description: "Modrinth-powered Forge and NeoForge mod management for Impulse servers."
   flags: ""
-  version: "0.3.1"
+  version: "0.3.2"
   target: "beta-2026-06"
   author: "Impulse"
   icon: ""

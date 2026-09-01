@@ -34,13 +34,6 @@ public final class ImpulseStandaloneClient {
         if (ImpulseStandaloneBootstrap.isLauncherLaunch()) return;
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft == null || !(minecraft.screen instanceof TitleScreen)) return;
-        if (Boolean.parseBoolean(System.getProperty("impulse.standalone.setup_required", "false"))) {
-            if (!setupOpened) {
-                setupOpened = true;
-                minecraft.setScreen(new SetupScreen(minecraft.screen, null));
-            }
-            return;
-        }
         if (!Boolean.parseBoolean(System.getProperty("impulse.standalone", "false"))) return;
         ensureServerList(minecraft);
         if (!autoConnectConsumed && Boolean.parseBoolean(System.getProperty("impulse.auto_connect", "false"))) {

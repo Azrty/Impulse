@@ -16,6 +16,7 @@ export type Manifest = {
   description?: string;
   icon_url?: string;
   banner_url?: string;
+  video_background_url?: string;
   minecraft?: { version?: string; loader?: string; loader_version?: string };
   server?: { address?: string; port?: number; auto_connect?: boolean };
   mods?: Mod[];
@@ -44,11 +45,14 @@ export type State = {
   privacy_url: string;
   terms_url: string;
   profiles: Profile[];
+  profile_icons: Record<string, string>;
   active_profile_id?: string;
   selected_profile?: Profile;
   manifest?: Manifest;
   restriction?: Restriction;
   update_channel: 'stable' | 'beta';
+  developer_tools_enabled: boolean;
+  developer_tools_active: boolean;
   impulse_version: string;
   onboarding_completed: boolean;
   dismissed_update_ids: string[];

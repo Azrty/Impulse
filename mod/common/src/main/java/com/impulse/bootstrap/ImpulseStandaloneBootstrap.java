@@ -82,7 +82,7 @@ public final class ImpulseStandaloneBootstrap {
     private static final Pattern MOTD_PORT = Pattern.compile("\\[impulse:(\\d{1,5})]", Pattern.CASE_INSENSITIVE);
     private static final Pattern TEXT_PORT = Pattern.compile("(?:impulse[-_\\s]*(?:manifest[-_\\s]*)?|manifest[-_\\s]*)port\\s*[:=]\\s*(\\d{1,5})", Pattern.CASE_INSENSITIVE);
     private static final Pattern TOML_MOD_ID = Pattern.compile("(?m)^\\s*modId\\s*=\\s*[\"']([^\"']+)[\"']");
-    private static final String UI_BUNDLE_VERSION = "webview-2";
+    private static final String UI_BUNDLE_VERSION = "webview-5";
     private static final long UI_READY_TIMEOUT_MS = 65000L;
     private static volatile ProgressReporter progressReporter = ProgressReporter.NONE;
     private static volatile boolean skippedGlobalRestoreHookRegistered;
@@ -159,12 +159,11 @@ public final class ImpulseStandaloneBootstrap {
                         return UiOutcome.SELECTED;
                     }
                     if ("quit".equals(result.status)) {
-                        System.out.println("[Impulse] Standalone legal terms were not accepted. Minecraft will close.");
+                        System.out.println("[Impulse] Standalone selector closed. Minecraft will close.");
                         return UiOutcome.QUIT;
                     }
-                    System.out.println("[Impulse] Standalone selector requested the in-game fallback.");
-                    markSetupRequired();
-                    return UiOutcome.FALLBACK;
+                    System.out.println("[Impulse] Standalone selector did not complete a launch. Minecraft will close.");
+                    return UiOutcome.QUIT;
                 }
                 if (!process.isAlive()) {
                     System.err.println("[Impulse] Standalone selector exited before selecting a profile.");
@@ -227,19 +226,9 @@ public final class ImpulseStandaloneBootstrap {
         }
     }
 
-    public static void markSetupRequired() {
-        System.setProperty("impulse.standalone.setup_required", "true");
-        System.clearProperty("impulse.standalone");
-        System.clearProperty("impulse.standalone.profile_id");
-    }
-
     private static UiOutcome nativeUiFailureOutcome(File gameDirectory) {
-        if (!hasAcceptedStandaloneLegal(gameDirectory)) {
-            System.err.println("[Impulse] The standalone legal documents have not been accepted; Minecraft will close.");
-            return UiOutcome.QUIT;
-        }
-        markSetupRequired();
-        return UiOutcome.FALLBACK;
+        System.err.println("[Impulse] The standalone selector could not complete; Minecraft will close.");
+        return UiOutcome.QUIT;
     }
 
     private static boolean hasAcceptedStandaloneLegal(File gameDirectory) {
@@ -425,8 +414,7 @@ public final class ImpulseStandaloneBootstrap {
         Store store = loadStore(gameDirectory);
         Profile profile = activeProfile(store);
         if (profile == null) {
-            System.setProperty("impulse.standalone.setup_required", "true");
-            return BootstrapResult.setupRequired();
+            throw new IOException("The selected standalone profile is unavailable.");
         }
 
         Discovery discovery;
@@ -446,8 +434,7 @@ public final class ImpulseStandaloneBootstrap {
         List<ManifestMod> problems = problematicMods(discovery.manifest, profile.selected_optional_ids);
         String problemSignature = problematicSignature(problems);
         if (!problems.isEmpty() && !problemSignature.equals(profile.accepted_unverified_mod_signature)) {
-            System.setProperty("impulse.standalone.setup_required", "true");
-            return BootstrapResult.setupRequired();
+            throw new IOException("The selected profile contains mods that were not approved before launch.");
         }
         publishRuntime(gameDirectory, profile, discovery.manifest);
         List<File> customModFiles = validatedCustomModFiles(gameDirectory, profile, managedMods);
@@ -1975,7 +1962,6 @@ public final class ImpulseStandaloneBootstrap {
 
     public enum UiOutcome {
         SELECTED,
-        FALLBACK,
         QUIT
     }
 

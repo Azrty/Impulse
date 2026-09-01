@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "eruda": "^3.4.3",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
