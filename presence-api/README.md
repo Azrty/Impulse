@@ -17,4 +17,6 @@ Build the production container with `docker build -t impulse-presence .`. Run ex
 
 Server safety reports are written atomically to `/reports` in the production container. Mount that directory to persistent storage, for example `-v impulse-reports:/reports`. Local development uses `presence-api/reports/`; set `REPORTS_DIRECTORY` to override it.
 
+Launcher availability is exposed at `GET /v1/launcher/isLauncherAvailable` and persisted in `data/launcher-availability.json`. Manage it from the API directory with `npm run launcher:enable`, `npm run launcher:disable`, or `npm run launcher:status`. The endpoint serves the last valid in-memory value if the registry becomes temporarily unreadable.
+
 The client proves ownership with Mojang's session server. Access tokens never leave Minecraft; the API receives only a one-time challenge, username, UUID verification result, request IP metadata, and short-lived presence calls. Music fields are optional, client-declared, limited to 128 characters each, and can be cleared by sending `music: null` in a heartbeat. Optional cover thumbnails are SHA-256-addressed JPEG/PNG files limited to 24 KiB and remain in memory for the same short activity lifetime.

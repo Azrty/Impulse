@@ -16,7 +16,10 @@
     "validate:updates": "tsx scripts/validate-standalone-updates.ts",
     "mods:recognize": "node scripts/recognize-mod.mjs",
     "servers:block": "node scripts/manage-blocked-server.mjs",
-    "servers:unblock": "node scripts/manage-blocked-server.mjs --remove"
+    "servers:unblock": "node scripts/manage-blocked-server.mjs --remove",
+    "launcher:enable": "node scripts/manage-launcher-availability.mjs enable",
+    "launcher:disable": "node scripts/manage-launcher-availability.mjs disable",
+    "launcher:status": "node scripts/manage-launcher-availability.mjs status"
   },
   "dependencies": {
     "@fastify/rate-limit": "^10.3.0",

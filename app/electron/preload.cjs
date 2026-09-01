@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('api', {
   getLegalConsent: () => ipcRenderer.invoke('get-legal-consent'),
   acceptLegalConsent: (payload) => ipcRenderer.invoke('accept-legal-consent', payload),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  getLauncherAvailability: () => ipcRenderer.invoke('get-launcher-availability'),
+  uninstallLauncher: () => ipcRenderer.invoke('uninstall-launcher'),
   offlineLogin: (username) => ipcRenderer.invoke('offline-login', username),
   microsoftLogin: () => ipcRenderer.invoke('microsoft-login'),
   getCurrentUser: () => ipcRenderer.invoke('get-current-user'),
@@ -81,6 +83,11 @@ contextBridge.exposeInMainWorld('api', {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('update-status', listener);
     return () => ipcRenderer.removeListener('update-status', listener);
+  },
+  onLauncherAvailabilityChanged: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('launcher-availability-changed', listener);
+    return () => ipcRenderer.removeListener('launcher-availability-changed', listener);
   },
 
   minimizeWindow: () => ipcRenderer.send('minimize-window'),

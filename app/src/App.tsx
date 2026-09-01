@@ -468,6 +468,44 @@ function WindowControls() {
   );
 }
 
+type LauncherAvailability = {
+  available: boolean;
+  remotelyAvailable: boolean;
+  bypassEnabled: boolean;
+  platform: string;
+};
+
+function LauncherEndOfLife({ platform }: { platform: string }) {
+  const [uninstallError, setUninstallError] = useState<string | null>(null);
+  const uninstall = async () => {
+    setUninstallError(null);
+    if (platform === 'win32' && !window.confirm('Uninstall Impulse Launcher? Your Minecraft profiles and local Impulse data will be preserved.')) return;
+    const result = await window.api?.uninstallLauncher();
+    if (!result?.success) setUninstallError(result?.error || 'Unable to start the Impulse uninstaller.');
+  };
+
+  return <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-[#050505] px-6 py-12 text-white">
+    <div className="pointer-events-none absolute inset-0 opacity-30 [background-image:linear-gradient(rgba(255,255,255,.04)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,.04)_1px,transparent_1px)] [background-size:42px_42px]" />
+    <div className="pointer-events-none absolute left-1/2 top-1/2 h-[70%] w-[70%] -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/[0.035] blur-3xl" />
+    <main className="relative w-full max-w-3xl border border-white/10 bg-black/75 p-8 shadow-2xl sm:p-12">
+      <div className="flex items-center gap-4">
+        <img src={impulseIcon} alt="Impulse" className="h-14 w-14 rounded-xl" />
+        <div><p className="text-xs font-semibold uppercase tracking-[0.24em] text-white/40">Impulse Launcher</p><p className="mt-1 text-sm text-white/55">End of life notice</p></div>
+      </div>
+      <h1 className="mt-10 text-3xl font-semibold leading-tight sm:text-4xl">Impulse Launcher has reached end of life</h1>
+      <p className="mt-5 max-w-2xl text-base leading-7 text-white/60">Impulse Launcher is no longer available. Impulse continues as a Minecraft mod that works with your existing installation and launchers such as Modrinth App.</p>
+      <div className="mt-9 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
+        <button onClick={() => void window.api?.openExternal('https://impulsemc.com/download/')} className="inline-flex h-12 items-center justify-center gap-2 bg-white px-5 text-sm font-semibold text-black transition hover:bg-white/85"><Download size={17} />Download Impulse Mod</button>
+        <button onClick={() => void window.api?.openExternal('https://modrinth.com/app')} className="inline-flex h-12 items-center justify-center gap-2 border border-white/20 px-5 text-sm font-medium transition hover:bg-white/10"><ExternalLink size={17} />Get Modrinth App</button>
+        <button onClick={() => void uninstall()} className="inline-flex h-12 items-center justify-center gap-2 border border-red-300/20 px-5 text-sm text-red-100 transition hover:bg-red-950/30"><Trash2 size={17} />{platform === 'darwin' ? 'Show Impulse Launcher in Finder' : 'Uninstall Impulse Launcher'}</button>
+      </div>
+      {platform === 'darwin' && <p className="mt-5 text-sm text-white/45">To uninstall Impulse Launcher, move the application to the Trash.</p>}
+      {platform !== 'darwin' && platform !== 'win32' && <p className="mt-5 text-sm text-white/45">You can uninstall Impulse Launcher using your system's application manager.</p>}
+      {uninstallError && <p className="mt-5 text-sm text-red-200">{uninstallError}</p>}
+    </main>
+  </div>;
+}
+
 function LegalConsent({ privacyUrl, termsUrl, onAccepted }: {
   privacyUrl: string;
   termsUrl: string;
@@ -1859,6 +1897,7 @@ function ModVerificationModal({ server, onCancel, onContinue }: { server: SavedS
 }
 
 export default function App() {
+  const [launcherAvailability, setLauncherAvailability] = useState<LauncherAvailability | null>(null);
   const [legalChecked, setLegalChecked] = useState(false);
   const [legalAccepted, setLegalAccepted] = useState(false);
   const [legalUrls, setLegalUrls] = useState({
@@ -1886,6 +1925,18 @@ export default function App() {
 
   useEffect(() => {
     if (!window.api) {
+      setLauncherAvailability({ available: true, remotelyAvailable: true, bypassEnabled: false, platform: 'web' });
+      return;
+    }
+    let active = true;
+    window.api.getLauncherAvailability().then((status) => { if (active) setLauncherAvailability(status); });
+    const cleanup = window.api.onLauncherAvailabilityChanged((status) => setLauncherAvailability(status));
+    return () => { active = false; cleanup(); };
+  }, []);
+
+  useEffect(() => {
+    if (launcherAvailability?.available !== true) return;
+    if (!window.api) {
       setLegalAccepted(true);
       setLegalChecked(true);
       return;
@@ -1896,10 +1947,10 @@ export default function App() {
         setLegalUrls({ privacy: status.privacyUrl, terms: status.termsUrl });
       })
       .finally(() => setLegalChecked(true));
-  }, []);
+  }, [launcherAvailability?.available]);
 
   useEffect(() => {
-    if (!legalAccepted) return;
+    if (!legalAccepted || launcherAvailability?.available !== true) return;
     const preview = async (invitation: ImpulseInvitation) => {
       if (invitation.error) { setInvitationPreview({ loading: false, error: invitation.error }); return; }
       setInvitationPreview({ loading: true, invitation });
@@ -1909,10 +1960,10 @@ export default function App() {
     const cleanup = window.api?.onDeepLink((invitation) => void preview(invitation));
     window.api?.consumeDeepLinks().then((links) => links.forEach((invitation) => void preview(invitation)));
     return () => cleanup?.();
-  }, [legalAccepted]);
+  }, [legalAccepted, launcherAvailability?.available]);
 
   useEffect(() => {
-    if (!legalAccepted) return;
+    if (!legalAccepted || launcherAvailability?.available !== true) return;
     let cancelled = false;
 
     window.api?.getCurrentUser().then((result) => {
@@ -1956,7 +2007,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [legalAccepted]);
+  }, [legalAccepted, launcherAvailability?.available]);
 
   useEffect(() => {
     const cleanups = [
@@ -2244,6 +2295,14 @@ export default function App() {
       setLaunchingId(null);
     }
   };
+
+  if (!launcherAvailability) {
+    return <div className="grid h-screen place-items-center bg-black text-white">Loading Impulse...</div>;
+  }
+
+  if (!launcherAvailability.available) {
+    return <div className="flex h-screen flex-col bg-black text-white"><WindowControls /><LauncherEndOfLife platform={launcherAvailability.platform} /></div>;
+  }
 
   if (!legalChecked) {
     return <div className="grid h-screen place-items-center bg-black text-white">Loading Impulse...</div>;

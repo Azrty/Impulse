@@ -4,7 +4,7 @@
     {
       "id": "new-ui-impulse",
       "title": "We fixed Impulse!",
-      "subtitle": "A faster, cleaner and more reliable standalone experience.",
+      "subtitle": "A faster, cleaner and more reliable Impulse experience.",
       "versions": [
         "1.3.0"
       ],
@@ -14,7 +14,7 @@
         {
           "icon": "sparkles",
           "title": "A completely new interface",
-          "body": "Impulse Standalone now gives you a cleaner, easier way to choose a server and start playing."
+          "body": "Impulse now gives you a cleaner, easier way to choose a server and start playing."
         },
         {
           "icon": "shield-check",
@@ -24,7 +24,7 @@
         {
           "icon": "package-plus",
           "title": "Your mods, your way",
-          "body": "Browse Modrinth and add compatible custom mods directly to each standalone profile."
+          "body": "Browse Modrinth and add compatible custom mods directly to each Impulse profile."
         },
         {
           "icon": "scan-check",

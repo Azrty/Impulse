@@ -45,7 +45,19 @@ export type PresenceServerOptions = {
   curseForgeApiKey?: string;
   curseForgeFetch?: typeof fetch;
   reportsDirectory?: string;
+  launcherAvailabilityFile?: string;
 };
+
+type LauncherAvailability = { schema_version: 1; isLauncherAvailable: boolean };
+
+export function sanitizeLauncherAvailability(value: unknown): LauncherAvailability {
+  if (!value || typeof value !== 'object') throw new Error('Invalid launcher availability registry.');
+  const candidate = value as Record<string, unknown>;
+  if (candidate.schema_version !== 1 || typeof candidate.isLauncherAvailable !== 'boolean') {
+    throw new Error('Launcher availability must contain schema_version 1 and a boolean isLauncherAvailable.');
+  }
+  return { schema_version: 1, isLauncherAvailable: candidate.isLauncherAvailable };
+}
 
 type CurseForgeRequestFile = { sha512: string; fingerprint: number };
 type CurseForgeFile = {
@@ -355,6 +367,22 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     const body = JSON.stringify(standaloneUpdates);
     return { body, etag: `"${crypto.createHash('sha256').update(body).digest('hex')}"` };
   }
+  const launcherAvailabilityPath = path.resolve(options.launcherAvailabilityFile
+    ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/launcher-availability.json'));
+  let launcherAvailability: LauncherAvailability = { schema_version: 1, isLauncherAvailable: false };
+  try {
+    launcherAvailability = sanitizeLauncherAvailability(JSON.parse(await readFile(launcherAvailabilityPath, 'utf8')));
+  } catch (error) {
+    app.log.warn({ error }, 'Unable to read launcher availability registry; defaulting to unavailable');
+  }
+  async function currentLauncherAvailability(): Promise<LauncherAvailability> {
+    try {
+      launcherAvailability = sanitizeLauncherAvailability(JSON.parse(await readFile(launcherAvailabilityPath, 'utf8')));
+    } catch (error) {
+      app.log.warn({ error }, 'Unable to refresh launcher availability; serving last valid copy');
+    }
+    return launcherAvailability;
+  }
 
   app.get('/v1/mod-verification/recognized-mods', async (request, reply) => {
     reply.header('Cache-Control', 'public, max-age=3600, stale-if-error=86400');
@@ -377,6 +405,12 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     reply.header('ETag', registry.etag);
     if (request.headers['if-none-match'] === registry.etag) return reply.code(304).send();
     return reply.type('application/json; charset=utf-8').send(registry.body);
+  });
+
+  app.get('/v1/launcher/isLauncherAvailable', async (_request, reply) => {
+    const availability = await currentLauncherAvailability();
+    reply.header('Cache-Control', 'no-store');
+    return { isLauncherAvailable: availability.isLauncherAvailable };
   });
 
   // Older Impulse clients sent bodyless POST requests through HttpURLConnection,

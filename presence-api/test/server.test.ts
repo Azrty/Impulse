@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -345,6 +345,27 @@ test('serves the blocked server registry with an ETag', async () => {
   assert.ok(response.headers.etag);
   const cached = await app.inject({ method: 'GET', url: '/v1/security/blocked-servers', headers: { 'if-none-match': String(response.headers.etag) } });
   assert.equal(cached.statusCode, 304);
+  await app.close();
+});
+
+test('serves launcher availability without HTTP caching and retains the last valid value', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'impulse-launcher-availability-'));
+  const file = path.join(directory, 'launcher-availability.json');
+  writeFileSync(file, JSON.stringify({ schema_version: 1, isLauncherAvailable: true }));
+  const app = await createPresenceServer({ secret: SECRET, logger: false, launcherAvailabilityFile: file });
+
+  const available = await app.inject({ method: 'GET', url: '/v1/launcher/isLauncherAvailable' });
+  assert.equal(available.statusCode, 200);
+  assert.deepEqual(available.json(), { isLauncherAvailable: true });
+  assert.equal(available.headers['cache-control'], 'no-store');
+
+  writeFileSync(file, '{invalid json');
+  const retained = await app.inject({ method: 'GET', url: '/v1/launcher/isLauncherAvailable' });
+  assert.deepEqual(retained.json(), { isLauncherAvailable: true });
+
+  writeFileSync(file, JSON.stringify({ schema_version: 1, isLauncherAvailable: false }));
+  const unavailable = await app.inject({ method: 'GET', url: '/v1/launcher/isLauncherAvailable' });
+  assert.deepEqual(unavailable.json(), { isLauncherAvailable: false });
   await app.close();
 });
 

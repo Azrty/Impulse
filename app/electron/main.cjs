@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, nativeImage, shell, systemPreferences } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, nativeImage, Notification, shell, systemPreferences } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs').promises;
@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const Store = require('electron-store');
 const { v4: uuidv4 } = require('uuid');
 const { autoUpdater } = require('electron-updater');
+const { spawn } = require('child_process');
 const { MinecraftLauncher } = require('./main/minecraft/launcher');
 const { ProfileManager } = require('./main/minecraft/profiles');
 const { CacheManager } = require('./main/minecraft/cache');
@@ -58,6 +59,7 @@ const IMPULSE_MOD_INDEX_URL = 'https://impulse.epivalent.com/mods/index.json';
 const IMPULSE_RECOGNIZED_MODS_URL = 'https://api.impulsemc.com/v1/mod-verification/recognized-mods';
 const IMPULSE_CURSEFORGE_VERIFICATION_URL = 'https://api.impulsemc.com/v1/mod-verification/curseforge';
 const IMPULSE_BLOCKED_SERVERS_URL = 'https://api.impulsemc.com/v1/security/blocked-servers';
+const IMPULSE_LAUNCHER_AVAILABILITY_URL = 'https://api.impulsemc.com/v1/launcher/isLauncherAvailable';
 const MODRINTH_VERSION_FILES_URL = 'https://api.modrinth.com/v2/version_files';
 const MODRINTH_API_URL = 'https://api.modrinth.com/v2';
 const LEGAL_DOCUMENT_VERSION = '2026-08-20.2';
@@ -77,6 +79,56 @@ let officialImpulseReleasesCache = { expiresAt: 0, releases: [] };
 const modVerificationCache = new Map();
 let recognizedModsCache = { expiresAt: 0, mods: null };
 let blockedServersCache = { expiresAt: 0, servers: null };
+let launcherAvailable = false;
+let bypassHoldTimer = null;
+
+function launcherBypassEnabled() {
+  return process.platform === 'darwin' && store.get('launcherAvailabilityBypass') === true;
+}
+
+function launcherCanOperate() {
+  return launcherAvailable || launcherBypassEnabled();
+}
+
+function launcherAvailabilityStatus() {
+  return {
+    available: launcherCanOperate(),
+    remotelyAvailable: launcherAvailable,
+    bypassEnabled: launcherBypassEnabled(),
+    platform: process.platform
+  };
+}
+
+async function refreshLauncherAvailability(timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(IMPULSE_LAUNCHER_AVAILABILITY_URL, {
+      headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', 'User-Agent': `ImpulseLauncher/${app.getVersion()}` },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.json();
+    if (typeof body?.isLauncherAvailable !== 'boolean') throw new Error('Invalid availability response.');
+    launcherAvailable = body.isLauncherAvailable;
+    store.set('launcherAvailabilityCache', launcherAvailable);
+  } catch (error) {
+    const cached = store.get('launcherAvailabilityCache');
+    launcherAvailable = typeof cached === 'boolean' ? cached : false;
+    console.warn(`Unable to check Launcher availability; using ${typeof cached === 'boolean' ? 'cached state' : 'unavailable default'}:`, error.message);
+  } finally {
+    clearTimeout(timer);
+  }
+  return launcherAvailabilityStatus();
+}
+
+function requireLauncherAvailability() {
+  if (!launcherCanOperate()) {
+    const error = new Error('Impulse Launcher has reached end of life.');
+    error.code = 'LAUNCHER_UNAVAILABLE';
+    throw error;
+  }
+}
 
 const SERVER_ACCESS_RESTRICTED_HEADING = 'Access to this server has been restricted by Impulse';
 const SERVER_RESTRICTION_REASONS = {
@@ -871,6 +923,26 @@ function createWindow() {
     : `file://${path.join(__dirname, '../dist/index.html')}`;
   mainWindow.webContents.on('before-input-event', (event, input) => {
     const key = String(input.key || '').toLowerCase();
+    const bypassKeysHeld = process.platform === 'darwin' && key === 'l' && input.meta && input.alt && input.shift;
+    if (bypassKeysHeld && input.type === 'keyDown') {
+      event.preventDefault();
+      if (!bypassHoldTimer) {
+        bypassHoldTimer = setTimeout(() => {
+          bypassHoldTimer = null;
+          const enabled = !launcherBypassEnabled();
+          store.set('launcherAvailabilityBypass', enabled);
+          if (enabled && legalConsentStatus().accepted) startConsentDependentServices();
+          if (!enabled && !launcherAvailable) destroyDiscordRpcClient().catch(() => {});
+          mainWindow?.webContents.send('launcher-availability-changed', launcherAvailabilityStatus());
+          if (Notification.isSupported()) new Notification({ title: 'Impulse', body: `Developer access ${enabled ? 'enabled' : 'disabled'}` }).show();
+        }, 5000);
+      }
+      return;
+    }
+    if (input.type === 'keyUp' && bypassHoldTimer) {
+      clearTimeout(bypassHoldTimer);
+      bypassHoldTimer = null;
+    }
     const wantsDevTools = input.type === 'keyDown' && (
       key === 'f12'
       || (key === 'i' && input.shift && (input.control || input.meta) && (process.platform !== 'darwin' || input.alt))
@@ -3246,12 +3318,13 @@ app.on('open-url', (event, url) => {
   deliverDeepLink(url);
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   app.setAsDefaultProtocolClient('impulse');
   Menu.setApplicationMenu(null);
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(impulseWindowIcon());
   }
+  await refreshLauncherAvailability();
   createWindow();
   mainWindow?.webContents.once('did-finish-load', () => {
     const startupLink = process.argv.find((value) => String(value).startsWith('impulse://'));
@@ -3276,6 +3349,30 @@ app.on('before-quit', () => {
 });
 
 ipcMain.handle('get-legal-consent', async () => legalConsentStatus());
+
+ipcMain.handle('get-launcher-availability', async () => launcherAvailabilityStatus());
+
+ipcMain.handle('uninstall-launcher', async () => {
+  if (process.platform === 'darwin') {
+    shell.showItemInFolder(path.resolve(process.execPath, '../../..'));
+    return { success: true, action: 'finder' };
+  }
+  if (process.platform !== 'win32' || !app.isPackaged) {
+    return { success: false, error: 'Automatic uninstallation is only available for an installed Windows build.' };
+  }
+  try {
+    const installDirectory = path.dirname(process.execPath);
+    const names = await fs.readdir(installDirectory);
+    const uninstallerName = names.find((name) => /^uninstall.*\.exe$/iu.test(name));
+    if (!uninstallerName) throw new Error('Impulse uninstaller was not found.');
+    const child = spawn(path.join(installDirectory, uninstallerName), [], { detached: true, stdio: 'ignore' });
+    child.unref();
+    setTimeout(() => app.quit(), 250);
+    return { success: true, action: 'uninstall' };
+  } catch (error) {
+    return { success: false, error: error.message || 'Unable to start the Impulse uninstaller.' };
+  }
+});
 
 ipcMain.handle('accept-legal-consent', async (_event, payload) => {
   if (payload?.privacyAccepted !== true || payload?.termsAccepted !== true) {
@@ -3388,6 +3485,7 @@ ipcMain.handle('impulse-list-servers', async () => getServers());
 
 ipcMain.handle('impulse-add-server', async (_event, payload) => {
   try {
+    requireLauncherAvailability();
     const servers = getServers();
     let entry = reconcileOptionalMods(await discoverServer(payload.address, payload.manifestPort || null, null, payload.manifestKey || null), false);
     const existing = servers.find((server) => server.id === entry.id);
@@ -3504,6 +3602,7 @@ ipcMain.handle('impulse-custom-mod-project', async (_event, serverId, projectId,
 
 ipcMain.handle('impulse-install-custom-mod', async (_event, serverId, projectId, versionId, channel = 'release') => {
   try {
+    requireLauncherAvailability();
     const server = getServers().find((entry) => entry.id === serverId);
     if (!server) return { success: false, error: 'Server not found.' };
     const plan = await resolveCustomModPlan(server, projectId, versionId || null, channel);
@@ -3517,6 +3616,7 @@ ipcMain.handle('impulse-install-custom-mod', async (_event, serverId, projectId,
 
 ipcMain.handle('impulse-remove-custom-mod', async (_event, serverId, projectId) => {
   try {
+    requireLauncherAvailability();
     const server = getServers().find((entry) => entry.id === serverId);
     if (!server) return { success: false, error: 'Server not found.' };
     const updated = await removeCustomMod(server, projectId);
@@ -3636,6 +3736,7 @@ ipcMain.handle('impulse-remove-server', async (_event, serverId) => {
 });
 
 ipcMain.handle('impulse-launch-server', async (event, serverId) => {
+  requireLauncherAvailability();
   requireLegalConsent();
   if (activeLaunch) return { success: false, error: 'Another launch operation is already running.' };
   activeLaunch = { serverId, controller: new AbortController(), startedAt: Date.now() };
@@ -3660,6 +3761,7 @@ ipcMain.handle('impulse-cancel-launch', async (_event, serverId) => {
 });
 
 ipcMain.handle('impulse-verify-server-files', async (event, serverId) => {
+  requireLauncherAvailability();
   if (activeGame) return { success: false, error: 'Close Minecraft before verifying game files.' };
   if (activeLaunch) return { success: false, error: 'Another launch operation is already running.' };
   activeLaunch = { serverId, controller: new AbortController(), startedAt: Date.now() };
@@ -3690,6 +3792,7 @@ ipcMain.handle('get-microphone-permission', async () => microphonePermissionStat
 ipcMain.handle('request-microphone-permission', async () => requestMicrophonePermission());
 
 ipcMain.handle('update-launcher-settings', async (_event, settings) => {
+  requireLauncherAvailability();
   const previousUpdateChannel = updateChannel();
   for (const [key, value] of Object.entries(settings || {})) {
     if (value === undefined) continue;
@@ -3729,6 +3832,7 @@ ipcMain.handle('update-launcher-settings', async (_event, settings) => {
 
 ipcMain.handle('clear-game-files', async () => {
   try {
+    requireLauncherAvailability();
     const minecraftPath = store.get('minecraftPath') || getImpulseMinecraftPath();
     const cleared = await clearImpulseGameFiles(minecraftPath);
     return { success: true, cleared };
@@ -3753,6 +3857,7 @@ ipcMain.handle('get-game-storage', async () => {
 });
 
 ipcMain.handle('verify-game-cache', async (event) => {
+  requireLauncherAvailability();
   if (activeGame || activeLaunch) return { success: false, error: 'Close Minecraft and wait for the current launch before scanning the cache.' };
   try {
     const minecraftPath = store.get('minecraftPath') || getImpulseMinecraftPath();
@@ -3768,6 +3873,7 @@ ipcMain.handle('verify-game-cache', async (event) => {
 });
 
 ipcMain.handle('clean-game-cache', async () => {
+  requireLauncherAvailability();
   if (activeGame || activeLaunch) return { success: false, error: 'Close Minecraft and wait for the current launch before cleaning the cache.' };
   try {
     const minecraftPath = store.get('minecraftPath') || getImpulseMinecraftPath();
@@ -3795,7 +3901,7 @@ function sendUpdateStatus(payload) {
 }
 
 function startConsentDependentServices() {
-  if (consentDependentServicesStarted) return;
+  if (consentDependentServicesStarted || !launcherCanOperate()) return;
   consentDependentServicesStarted = true;
   setupAutoUpdater();
   updateLauncherDiscordActivity('browsing');

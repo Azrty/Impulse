@@ -8,6 +8,8 @@ declare global {
       getLegalConsent: () => Promise<{ accepted: boolean; requiredVersion: string; acceptedAt: string | null; privacyUrl: string; termsUrl: string }>;
       acceptLegalConsent: (payload: { privacyAccepted: boolean; termsAccepted: boolean }) => Promise<{ success: boolean; error?: string; accepted?: boolean; requiredVersion?: string }>;
       openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
+      getLauncherAvailability: () => Promise<{ available: boolean; remotelyAvailable: boolean; bypassEnabled: boolean; platform: string }>;
+      uninstallLauncher: () => Promise<{ success: boolean; action?: 'uninstall' | 'finder'; error?: string }>;
       offlineLogin: (username: string) => Promise<{ success: boolean; error?: string; user?: User }>;
       microsoftLogin: () => Promise<{ success: boolean; error?: string; user?: User; account?: MinecraftAccount }>;
       getCurrentUser: () => Promise<{ success: boolean; error?: string; user?: User }>;
@@ -81,6 +83,7 @@ declare global {
         transferred?: number;
         total?: number;
       }) => void) => () => void;
+      onLauncherAvailabilityChanged: (callback: (data: { available: boolean; remotelyAvailable: boolean; bypassEnabled: boolean; platform: string }) => void) => () => void;
 
       minimizeWindow: () => void;
       maximizeWindow: () => void;
