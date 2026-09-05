@@ -68,7 +68,7 @@ import javax.naming.directory.InitialDirContext;
  * Loader-neutral standalone bootstrap used before Forge or NeoForge finishes mod discovery.
  */
 public final class ImpulseStandaloneBootstrap {
-    public static final String LEGAL_DOCUMENT_VERSION = "2026-08-20.2";
+    public static final String LEGAL_DOCUMENT_VERSION = "2026-09-05.1";
     public static final String OUTDATED_HASH_MESSAGE = "This server uses an outdated mod manifest that does not provide SHA-512 hashes. Ask the server owner to update Impulse.";
     public static final String SERVER_ACCESS_RESTRICTED_HEADING = "Access to this server has been restricted by Impulse";
     public static final String PRIVACY_POLICY_URL = "https://impulsemc.com/privacy/";
@@ -121,12 +121,18 @@ public final class ImpulseStandaloneBootstrap {
             request.assets_directory = bundle.assetsDirectory.getAbsolutePath();
             request.parent_pid = currentProcessId();
             request.impulse_version = currentImpulseVersion();
+            request.launch_log_path = StandaloneLaunchLog.currentLogPath();
+            request.launch_directory = StandaloneLaunchLog.currentLaunchDirectory();
+            request.launch_started_at = StandaloneLaunchLog.currentStartedAt();
             File requestFile = new File(sessionDirectory, "request.json");
             writeTextAtomic(requestFile, GSON.toJson(request));
 
-            File logFile = new File(new File(standaloneRoot(gameDirectory), "ui"), "latest.log");
-            FileOutputStream truncate = new FileOutputStream(logFile, false);
-            truncate.close();
+            File fallbackLogFile = new File(new File(standaloneRoot(gameDirectory), "ui"), "latest.log");
+            File logFile = request.launch_log_path == null ? fallbackLogFile : new File(request.launch_log_path);
+            if (request.launch_log_path == null) {
+                FileOutputStream truncate = new FileOutputStream(logFile, false);
+                truncate.close();
+            }
             File java = new File(new File(System.getProperty("java.home"), "bin"), isWindows() ? "java.exe" : "java");
             List<String> command = new ArrayList<String>();
             command.add(java.getAbsolutePath());
@@ -139,6 +145,7 @@ public final class ImpulseStandaloneBootstrap {
             command.add(requestFile.getAbsolutePath());
 
             System.out.println("[Impulse] Opening standalone profile selector. Log: " + logFile);
+            StandaloneLaunchLog.info("ui", "Opening standalone profile selector", null);
             ProcessBuilder processBuilder = new ProcessBuilder(command)
                 .directory(bundle.rootDirectory)
                 .redirectErrorStream(true)
@@ -211,7 +218,7 @@ public final class ImpulseStandaloneBootstrap {
         }
     }
 
-    private static String currentImpulseVersion() {
+    public static String currentImpulseVersion() {
         InputStream input = null;
         try {
             input = ImpulseStandaloneBootstrap.class.getResourceAsStream("/impulse-version.properties");
@@ -465,14 +472,17 @@ public final class ImpulseStandaloneBootstrap {
 
     private static Discovery discover(String input, String expectedPublicKey, boolean verifyMods) throws IOException {
         Address address = parseAddress(input);
+        StandaloneLaunchLog.info("server", "Starting server discovery", StandaloneLaunchLog.fields("host", address.host, "minecraft_port", address.port));
         assertServerAllowed(address.host);
         if (!address.connectHost.equalsIgnoreCase(address.host)) assertServerAllowed(address.connectHost);
         JsonObject status = null;
         IOException pingError = null;
         try {
             status = ping(address.connectHost, address.host, address.port);
+            StandaloneLaunchLog.info("server", "Minecraft status ping succeeded", null);
         } catch (IOException error) {
             pingError = error;
+            StandaloneLaunchLog.warn("server", "Minecraft status ping failed", StandaloneLaunchLog.fields("error", error.getMessage()));
         }
         int discoveredPort = status == null ? -1 : extractManifestPort(status);
         List<Integer> candidatePorts = new ArrayList<Integer>();
@@ -485,13 +495,16 @@ public final class ImpulseStandaloneBootstrap {
         int manifestPort = DEFAULT_MANIFEST_PORT;
         for (Integer candidatePort : candidatePorts) {
             URL candidateUrl = new URL("http", address.connectHost, candidatePort, "/impulse/server.json");
+            StandaloneLaunchLog.info("manifest", "Checking manifest endpoint", StandaloneLaunchLog.fields("port", candidatePort));
             try {
                 payload = readPayload(candidateUrl, MAX_MANIFEST_BYTES, 4000, 10000);
                 manifestUrl = candidateUrl;
                 manifestPort = candidatePort;
+                StandaloneLaunchLog.info("manifest", "Manifest downloaded", StandaloneLaunchLog.fields("port", candidatePort, "bytes", payload.body.length));
                 break;
             } catch (IOException error) {
                 manifestError = error;
+                StandaloneLaunchLog.warn("manifest", "Manifest endpoint failed", StandaloneLaunchLog.fields("port", candidatePort, "error", error.getMessage()));
             }
         }
         if (payload == null || manifestUrl == null) {
@@ -502,6 +515,7 @@ public final class ImpulseStandaloneBootstrap {
             throw new IOException(message.toString(), manifestError == null ? pingError : manifestError);
         }
         String manifestPublicKey = verifyManifestPayload(payload, expectedPublicKey);
+        StandaloneLaunchLog.info("manifest", manifestPublicKey == null ? "Manifest is unsigned" : "Manifest Ed25519 signature verified", null);
         String raw = new String(payload.body, StandardCharsets.UTF_8);
         Manifest manifest;
         try {
@@ -510,6 +524,7 @@ public final class ImpulseStandaloneBootstrap {
             throw new IOException("The server returned an invalid Impulse manifest: " + error.getMessage(), error);
         }
         normalizeManifest(manifest);
+        StandaloneLaunchLog.info("manifest", "Manifest parsed", StandaloneLaunchLog.fields("required_mods", safeMods(manifest).size(), "optional_mods", safeOptionalMods(manifest).size()));
         if (verifyMods) verifyManifestModOrigins(manifest);
         if (manifest.minecraft == null || clean(manifest.minecraft.version, "").length() == 0) {
             throw new IOException("The Impulse manifest does not contain a Minecraft version.");
@@ -1036,6 +1051,7 @@ public final class ImpulseStandaloneBootstrap {
 
     private static void syncMods(File gameDirectory, File managedDirectory, Discovery discovery, List<ManifestMod> mods) throws Exception {
         checkCancelled();
+        StandaloneLaunchLog.info("mods", "Starting managed mod synchronization", StandaloneLaunchLog.fields("active_mods", mods.size()));
         Map<String, File> globalHashes = new HashMap<String, File>();
         Map<String, File> globalIds = new HashMap<String, File>();
         scanGlobalMods(new File(gameDirectory, "mods"), globalHashes, globalIds);
@@ -1048,6 +1064,7 @@ public final class ImpulseStandaloneBootstrap {
                 throw new IOException("Duplicate client mod filename in manifest: " + fileName);
             }
             if (globalHashes.containsKey(mod.sha512)) {
+                StandaloneLaunchLog.info("mods", "Mod satisfied by matching global jar", StandaloneLaunchLog.fields("mod", displayName(mod)));
                 satisfiedByGlobal.add(fileName.toLowerCase(Locale.US));
                 continue;
             }
@@ -1055,6 +1072,7 @@ public final class ImpulseStandaloneBootstrap {
             if (playerMod != null) {
                 satisfiedByGlobal.add(fileName.toLowerCase(Locale.US));
                 System.out.println("[Impulse] Keeping player-installed mod " + playerMod.getName() + " for " + displayName(mod) + ".");
+                StandaloneLaunchLog.info("mods", "Keeping player-installed mod", StandaloneLaunchLog.fields("mod", displayName(mod), "file", playerMod.getName()));
                 continue;
             }
             desired.put(fileName.toLowerCase(Locale.US), mod);
@@ -1136,13 +1154,16 @@ public final class ImpulseStandaloneBootstrap {
         for (int attempt = 1; attempt <= 3; attempt++) {
             checkCancelled();
             try {
+                StandaloneLaunchLog.info("download", "Starting mod download", StandaloneLaunchLog.fields("mod", displayName(mod), "attempt", attempt, "size", mod.size));
                 download(url, target, mod.size);
                 String actual = sha512(target);
                 if (!mod.sha512.equals(actual)) throw new IOException("SHA-512 mismatch for " + mod.file_name + ": expected " + mod.sha512 + ", got " + actual);
+                StandaloneLaunchLog.info("download", "Mod download verified", StandaloneLaunchLog.fields("mod", displayName(mod), "sha512", actual));
                 return;
             } catch (Exception error) {
                 if (error instanceof InterruptedException || error instanceof InterruptedIOException || Thread.currentThread().isInterrupted()) throw error;
                 last = error;
+                StandaloneLaunchLog.warn("download", "Mod download attempt failed", StandaloneLaunchLog.fields("mod", displayName(mod), "attempt", attempt, "error", error.getMessage()));
                 if (attempt < 3) Thread.sleep(delays[attempt - 1]);
             }
         }
@@ -1175,6 +1196,9 @@ public final class ImpulseStandaloneBootstrap {
         try {
             byte[] buffer = new byte[64 * 1024];
             long lastProgress = System.currentTimeMillis();
+            long startedAt = lastProgress;
+            long lastLoggedAt = 0L;
+            int lastPercent = -1;
             while (true) {
                 checkCancelled();
                 try {
@@ -1182,6 +1206,16 @@ public final class ImpulseStandaloneBootstrap {
                     if (read < 0) break;
                     output.write(buffer, 0, read);
                     lastProgress = System.currentTimeMillis();
+                    long downloaded = output.getChannel().position();
+                    int percent = expectedSize > 0 ? (int) Math.min(100L, downloaded * 100L / expectedSize) : -1;
+                    if (percent != lastPercent || lastProgress - lastLoggedAt >= 1000L) {
+                        long elapsed = Math.max(1L, lastProgress - startedAt);
+                        long speed = Math.max(0L, (downloaded - existing) * 1000L / elapsed);
+                        StandaloneLaunchLog.info("download", "Download progress", StandaloneLaunchLog.fields("file", target.getName(),
+                            "bytes", downloaded, "total_bytes", expectedSize, "percent", percent, "bytes_per_second", speed));
+                        lastPercent = percent;
+                        lastLoggedAt = lastProgress;
+                    }
                 } catch (SocketTimeoutException timeout) {
                     checkCancelled();
                     if (System.currentTimeMillis() - lastProgress >= 30000L) {
@@ -1986,6 +2020,9 @@ public final class ImpulseStandaloneBootstrap {
         public String assets_directory;
         public long parent_pid;
         public String impulse_version;
+        public String launch_log_path;
+        public String launch_directory;
+        public long launch_started_at;
     }
 
     public static final class UiResult {

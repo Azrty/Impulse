@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ArrowLeft, Check, ChevronLeft, ChevronRight, Cog, Download, ExternalLink, FileWarning,
-  Flag, Globe2, History, ImageOff, LoaderCircle, LockKeyhole, MoreHorizontal, Package, PackagePlus, Play, Plus,
+  AlertTriangle, ArrowLeft, Bug, Check, ChevronLeft, ChevronRight, CircleHelp, Cog, Download, ExternalLink, FileWarning,
+  Flag, Globe2, History, ImageOff, LoaderCircle, LockKeyhole, MoreHorizontal, Package, PackagePlus, Paperclip, Play, Plus,
   RefreshCw, Rocket, ScanSearch, Search, Server, Settings2, ShieldCheck, Sparkles, Trash2, Wrench, X,
 } from 'lucide-react';
 import eruda from 'eruda';
@@ -78,6 +78,7 @@ export function App() {
   const [modManagerOpen, setModManagerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newsOpen, setNewsOpen] = useState(false);
+  const [bugReportOpen, setBugReportOpen] = useState(false);
   const [developerToolsOpen, setDeveloperToolsOpen] = useState(false);
   const pollRef = useRef<number | undefined>(undefined);
   const updatesRefreshed = useRef(false);
@@ -283,6 +284,7 @@ export function App() {
         <div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong></div>
         <div className="topbar-actions">
           <button className="whats-new-button" onClick={() => setNewsOpen(true)}><Sparkles size={15} /> What’s new</button>
+          <button className="icon-button" title="Report a bug" aria-label="Report a bug" onClick={() => setBugReportOpen(true)}><CircleHelp size={17} /></button>
           <button className="icon-button topbar-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Cog size={17} /></button>
         </div>
       </header>
@@ -340,8 +342,9 @@ export function App() {
       {optionalOpen && profile && manifest && <OptionalMods profile={profile} manifest={manifest} onClose={() => setOptionalOpen(false)} onSave={ids => { setOptionalOpen(false); start('optional', { profile_id: profile.id, ids }); }} />}
       {warning && <VerificationWarning warning={warning} onCancel={() => setWarning(undefined)} onContinue={() => { setWarning(undefined); launch(true); }} />}
       {modManagerOpen && profile && <ModManager profile={profile} state={state} start={start} operation={operation} onClose={async () => { setModManagerOpen(false); await loadState(); }} />}
-      {settingsOpen && <StandaloneSettings state={state} developerToolsOpen={developerToolsOpen} onToggleDeveloperTools={toggleDeveloperTools} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onNews={() => { setSettingsOpen(false); setNewsOpen(true); }} />}
+      {settingsOpen && <StandaloneSettings state={state} developerToolsOpen={developerToolsOpen} onToggleDeveloperTools={toggleDeveloperTools} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onNews={() => { setSettingsOpen(false); setNewsOpen(true); }} onReportBug={() => { setSettingsOpen(false); setBugReportOpen(true); }} />}
       {newsOpen && <NewsHistory publications={state.publications || []} currentVersion={state.impulse_version} dismissed={state.dismissed_update_ids || []} onClose={() => setNewsOpen(false)} />}
+      {bugReportOpen && <BugReport operation={operation?.kind === 'reportBug' ? operation : undefined} onClose={() => setBugReportOpen(false)} onSubmit={(description, includeDiagnostics, screenshots) => start('reportBug', { description, include_diagnostics: includeDiagnostics, screenshots })} />}
     </div>
   );
 }
@@ -410,8 +413,72 @@ function NewsHistory({ publications, currentVersion, dismissed, onClose }: { pub
   return <div className="news-history-layer"><WhatsNew publication={publication} mode="history" onClose={onClose} onPrevious={index > 0 ? () => setIndex(value => value - 1) : undefined} onNext={index < publications.length - 1 ? () => setIndex(value => value + 1) : undefined} position={`${index + 1} of ${publications.length}${publication.versions.includes(currentVersion) ? ' · This version' : ''}${dismissed.includes(publication.id) ? ' · Read' : ''}`} /></div>;
 }
 
-function StandaloneSettings({ state, developerToolsOpen, onToggleDeveloperTools, onClose, onChange, onReplay, onNews }: { state: State; developerToolsOpen: boolean; onToggleDeveloperTools: () => void; onClose: () => void; onChange: (state: State) => void; onReplay: () => void; onNews: () => void }) {
-  return <div className="modal-backdrop"><div className="modal settings-modal"><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">Impulse</span><h2>Settings</h2><p>Manage how this Impulse installation behaves.</p><section className="settings-section"><div><strong>Update channel</strong><small>Stable receives production releases. Beta also receives previews.</small></div><div className="segments">{(['stable', 'beta'] as const).map(channel => <button key={channel} className={state.update_channel === channel ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setUpdateChannel', { channel }))}>{channel}</button>)}</div></section><section className="settings-section"><div><strong>Developer tools</strong><small>{state.developer_tools_enabled ? 'Toggle with F12, Ctrl+Shift+I, or Cmd+Option+I. Press Escape to close.' : 'Enable the embedded inspector and its keyboard shortcuts.'}</small></div><div className="settings-tools-actions"><div className="segments"><button className={!state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: false }))}>Off</button><button className={state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: true }))}>On</button></div>{state.developer_tools_enabled && <button className="secondary" onClick={onToggleDeveloperTools}>{developerToolsOpen ? 'Close' : 'Open'}</button>}</div></section><section className="settings-section"><div><strong>What’s new</strong><small>Read current and previous Impulse update notes.</small></div><button className="secondary" onClick={onNews}><History /> Open</button></section><section className="settings-section"><div><strong>Onboarding</strong><small>Replay the introduction to Impulse.</small></div><button className="secondary" onClick={onReplay}><Rocket /> Replay</button></section><footer className="settings-about"><span>Installed version</span><strong>{state.impulse_version}</strong></footer></div></div>;
+type BugScreenshot = { id: string; name: string; mime: string; base64: string; preview: string; size: number };
+type BugReportInfo = { attachments: { name: string; size: number; kind: string }[] };
+type PickedScreenshot = { name: string; mime: string; base64: string };
+
+async function compressScreenshot(file: File): Promise<BugScreenshot> {
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error(`${file.name} is not a supported image.`);
+  const bitmap = await createImageBitmap(file);
+  if (bitmap.width * bitmap.height > 40_000_000) { bitmap.close(); throw new Error(`${file.name} is larger than 40 megapixels.`); }
+  let scale = Math.min(1, 2560 / Math.max(bitmap.width, bitmap.height));
+  let blob: Blob | null = null;
+  for (let pass = 0; pass < 8; pass += 1) {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) { bitmap.close(); throw new Error('Impulse could not process this screenshot.'); }
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const quality = Math.max(.48, .9 - pass * .07);
+    blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+    if (blob && blob.size <= 5 * 1024 * 1024) break;
+    scale *= .82;
+  }
+  bitmap.close();
+  if (!blob || blob.size > 5 * 1024 * 1024) throw new Error(`${file.name} could not be compressed below 5 MiB.`);
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  return { id: crypto.randomUUID(), name: file.name, mime: 'image/jpeg', base64: btoa(binary), preview: URL.createObjectURL(blob), size: blob.size };
+}
+
+function BugReport({ operation, onClose, onSubmit }: { operation?: Operation; onClose: () => void; onSubmit: (description: string, includeDiagnostics: boolean, screenshots: Omit<BugScreenshot, 'preview' | 'id' | 'name' | 'size'>[]) => void }) {
+  const [description, setDescription] = useState('');
+  const [includeDiagnostics, setIncludeDiagnostics] = useState(true);
+  const [screenshots, setScreenshots] = useState<BugScreenshot[]>([]);
+  const [info, setInfo] = useState<BugReportInfo>({ attachments: [] });
+  const [localError, setLocalError] = useState('');
+  const [processing, setProcessing] = useState(false);
+  const screenshotsRef = useRef<BugScreenshot[]>([]);
+  const busy = operation?.status === 'running';
+  const result = operation?.status === 'done' ? operation.result as { report_submitted?: boolean; report_id?: string } : undefined;
+  useEffect(() => { void invoke<BugReportInfo>('bugReportInfo').then(setInfo).catch(() => undefined); }, []);
+  useEffect(() => { screenshotsRef.current = screenshots; }, [screenshots]);
+  useEffect(() => () => screenshotsRef.current.forEach(item => URL.revokeObjectURL(item.preview)), []);
+  const pickImages = async () => {
+    if (busy || processing || screenshots.length >= 5 || result?.report_submitted) return;
+    setProcessing(true); setLocalError('');
+    try {
+      const picked = await invoke<PickedScreenshot[]>('pickScreenshots');
+      if (screenshots.length + picked.length > 5) throw new Error('You can attach up to five screenshots.');
+      const added: BugScreenshot[] = [];
+      for (const item of picked) {
+        const binary = atob(item.base64);
+        const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+        added.push(await compressScreenshot(new File([bytes], item.name, { type: item.mime })));
+      }
+      setScreenshots(current => [...current, ...added]);
+    } catch (reason) { setLocalError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setProcessing(false); }
+  };
+  const remove = (id: string) => setScreenshots(current => { const item = current.find(value => value.id === id); if (item) URL.revokeObjectURL(item.preview); return current.filter(value => value.id !== id); });
+  const valid = description.trim().length >= 20 && description.trim().length <= 10000;
+  return <div className="bug-report-screen"><header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong><span>Support</span></div><button className="onboarding-close" disabled={busy} onClick={onClose}><X /></button></header><main><section className="bug-report-copy"><span className="eyebrow">Report a bug</span><h1>Help us make Impulse better</h1><p>Describe what happened and what you expected. Technical details are only included when the option below is enabled.</p><label className="field"><span>What happened?</span><textarea autoFocus disabled={busy || !!result?.report_submitted} value={description} maxLength={10000} onChange={event => setDescription(event.target.value)} placeholder="Tell us what you were doing, what went wrong, and whether you can reproduce it." /><small>{description.trim().length}/10,000 · minimum 20 characters</small></label><label className="diagnostics-check"><input type="checkbox" checked={includeDiagnostics} disabled={busy || !!result?.report_submitted} onChange={event => setIncludeDiagnostics(event.target.checked)} /><span><Check /></span><div><strong>Include diagnostics</strong><small>Attach anonymous technical details from the previous launch.</small></div></label>{includeDiagnostics && <details className="diagnostic-files" open><summary>{info.attachments.length} diagnostic file{info.attachments.length === 1 ? '' : 's'} selected</summary>{info.attachments.length ? info.attachments.map(file => <div key={`${file.kind}-${file.name}`}><Paperclip /><span>{file.name}</span><small>{fmtBytes(file.size)}</small></div>) : <p>No previous-launch diagnostics are available.</p>}</details>}</section><aside className="bug-screenshots"><div><span className="eyebrow">Screenshots</span><h2>Add visual context</h2><p>Up to five images. Impulse compresses them before upload.</p></div><button type="button" className="screenshot-picker" disabled={busy || processing || screenshots.length >= 5 || !!result?.report_submitted} onClick={() => void pickImages()}><Plus /><strong>{processing ? 'Processing images…' : 'Add screenshots'}</strong><small>PNG, JPEG or WebP · 5 MiB each after compression</small></button><div className="screenshot-grid">{screenshots.map(item => <figure key={item.id}><img src={item.preview} alt={item.name} /><button disabled={busy} onClick={() => remove(item.id)}><X /></button><figcaption>{fmtBytes(item.size)}</figcaption></figure>)}</div></aside></main><footer><div>{(localError || operation?.error) && <span className="bug-error"><AlertTriangle />{localError || operation?.error}</span>}{result?.report_submitted && <span className="bug-success"><Check />Report received · {result.report_id}</span>}</div><div><button className="secondary" disabled={busy} onClick={onClose}>{result?.report_submitted ? 'Close' : 'Cancel'}</button>{!result?.report_submitted && <button className="primary" disabled={!valid || busy || processing} onClick={() => onSubmit(description.trim(), includeDiagnostics, screenshots.map(({ mime, base64 }) => ({ mime, base64 })))}>{busy ? <><LoaderCircle className="spin" /> Sending…</> : operation?.status === 'error' ? 'Try again' : 'Submit report'}</button>}</div></footer></div>;
+}
+
+function StandaloneSettings({ state, developerToolsOpen, onToggleDeveloperTools, onClose, onChange, onReplay, onNews, onReportBug }: { state: State; developerToolsOpen: boolean; onToggleDeveloperTools: () => void; onClose: () => void; onChange: (state: State) => void; onReplay: () => void; onNews: () => void; onReportBug: () => void }) {
+  return <div className="modal-backdrop"><div className="modal settings-modal"><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">Impulse</span><h2>Settings</h2><p>Manage how this Impulse installation behaves.</p><section className="settings-section"><div><strong>Update channel</strong><small>Stable receives production releases. Beta also receives previews.</small></div><div className="segments">{(['stable', 'beta'] as const).map(channel => <button key={channel} className={state.update_channel === channel ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setUpdateChannel', { channel }))}>{channel}</button>)}</div></section><section className="settings-section"><div><strong>Developer tools</strong><small>{state.developer_tools_enabled ? 'Toggle with F12, Ctrl+Shift+I, or Cmd+Option+I. Press Escape to close.' : 'Enable the embedded inspector and its keyboard shortcuts.'}</small></div><div className="settings-tools-actions"><div className="segments"><button className={!state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: false }))}>Off</button><button className={state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: true }))}>On</button></div>{state.developer_tools_enabled && <button className="secondary" onClick={onToggleDeveloperTools}>{developerToolsOpen ? 'Close' : 'Open'}</button>}</div></section><section className="settings-section"><div><strong>Report a bug</strong><small>Send feedback with optional launch diagnostics and screenshots.</small></div><button className="secondary" onClick={onReportBug}><Bug /> Open</button></section><section className="settings-section"><div><strong>What’s new</strong><small>Read current and previous Impulse update notes.</small></div><button className="secondary" onClick={onNews}><History /> Open</button></section><section className="settings-section"><div><strong>Onboarding</strong><small>Replay the introduction to Impulse.</small></div><button className="secondary" onClick={onReplay}><Rocket /> Replay</button></section><footer className="settings-about"><span>Installed version</span><strong>{state.impulse_version}</strong></footer></div></div>;
 }
 
 function ServerRow({ profile, iconUrl, selected, onClick }: { profile: Profile; iconUrl?: string; selected: boolean; onClick: () => void }) {

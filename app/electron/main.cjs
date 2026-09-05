@@ -81,6 +81,7 @@ let recognizedModsCache = { expiresAt: 0, mods: null };
 let blockedServersCache = { expiresAt: 0, servers: null };
 let launcherAvailable = false;
 let bypassHoldTimer = null;
+let bypassChordActive = false;
 
 function launcherBypassEnabled() {
   return process.platform === 'darwin' && store.get('launcherAvailabilityBypass') === true;
@@ -923,10 +924,16 @@ function createWindow() {
     : `file://${path.join(__dirname, '../dist/index.html')}`;
   mainWindow.webContents.on('before-input-event', (event, input) => {
     const key = String(input.key || '').toLowerCase();
-    const bypassKeysHeld = process.platform === 'darwin' && key === 'l' && input.meta && input.alt && input.shift;
+    // Option modifies the produced character on macOS (Option+L is often "¬"),
+    // so use the physical key code as the reliable signal for this chord.
+    const physicalKey = String(input.code || '').toLowerCase();
+    const bypassKeysHeld = process.platform === 'darwin'
+      && (key === 'l' || physicalKey === 'keyl')
+      && input.meta && input.alt && input.shift;
     if (bypassKeysHeld && input.type === 'keyDown') {
       event.preventDefault();
-      if (!bypassHoldTimer) {
+      if (!bypassChordActive) {
+        bypassChordActive = true;
         bypassHoldTimer = setTimeout(() => {
           bypassHoldTimer = null;
           const enabled = !launcherBypassEnabled();
@@ -935,13 +942,16 @@ function createWindow() {
           if (!enabled && !launcherAvailable) destroyDiscordRpcClient().catch(() => {});
           mainWindow?.webContents.send('launcher-availability-changed', launcherAvailabilityStatus());
           if (Notification.isSupported()) new Notification({ title: 'Impulse', body: `Developer access ${enabled ? 'enabled' : 'disabled'}` }).show();
-        }, 5000);
+        }, 2000);
       }
       return;
     }
-    if (input.type === 'keyUp' && bypassHoldTimer) {
-      clearTimeout(bypassHoldTimer);
-      bypassHoldTimer = null;
+    if (input.type === 'keyUp' && (key === 'l' || physicalKey === 'keyl')) {
+      bypassChordActive = false;
+      if (bypassHoldTimer) {
+        clearTimeout(bypassHoldTimer);
+        bypassHoldTimer = null;
+      }
     }
     const wantsDevTools = input.type === 'keyDown' && (
       key === 'f12'

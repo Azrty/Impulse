@@ -7,7 +7,7 @@ COPY src ./src
 RUN npm run build
 
 FROM node:22-alpine AS runtime
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=8080 REPORTS_DIRECTORY=/reports
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=8080 REPORTS_DIRECTORY=/reports BUG_REPORTS_DIRECTORY=/reports/bugs BUG_REPORT_RETENTION_DAYS=90 BUG_REPORT_MAX_STORAGE_BYTES=21474836480
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force

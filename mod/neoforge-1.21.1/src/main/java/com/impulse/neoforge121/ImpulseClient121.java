@@ -35,6 +35,7 @@ import java.util.Properties;
 
 public final class ImpulseClient121 {
     private static boolean autoConnectConsumed;
+    private static boolean standaloneTitleLogged;
 
     private ImpulseClient121() {
     }
@@ -46,6 +47,10 @@ public final class ImpulseClient121 {
 
     @SubscribeEvent
     public void onScreenOpening(ScreenEvent.Opening event) {
+        if (!isImpulseLaunch() && !standaloneTitleLogged && event.getNewScreen() instanceof TitleScreen) {
+            standaloneTitleLogged = true;
+            com.impulse.bootstrap.StandaloneLaunchLog.info("runtime", "Minecraft title screen is ready", null);
+        }
         if (!isImpulseLaunch() || !menuEnabled()) return;
         if (event.getNewScreen() instanceof TitleScreen || (event.getNewScreen() instanceof JoinMultiplayerScreen && !multiplayerEnabled())) {
             if (!(event.getNewScreen() instanceof ClassicImpulseScreen)) {

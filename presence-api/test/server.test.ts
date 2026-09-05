@@ -11,6 +11,18 @@ const blockedServers = JSON.parse(readFileSync(new URL('../data/blocked-servers.
 const SECRET = 'test-secret-that-is-definitely-longer-than-thirty-two-characters';
 const UUID = '39d9ec7970394f039078ad79e84ff976';
 
+function multipart(parts: Array<{ field: string; name: string; type: string; value: string | Buffer }>) {
+  const boundary = `ImpulseTest${crypto.randomBytes(8).toString('hex')}`;
+  const chunks: Buffer[] = [];
+  for (const part of parts) {
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${part.field}"; filename="${part.name}"\r\nContent-Type: ${part.type}\r\n\r\n`));
+    chunks.push(Buffer.isBuffer(part.value) ? part.value : Buffer.from(part.value));
+    chunks.push(Buffer.from('\r\n'));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  return { boundary, payload: Buffer.concat(chunks) };
+}
+
 test('matches Minecraft offline UUID generation', () => {
   assert.equal(minecraftOfflineUuid('Notch'), 'b50ad385829d3141a2167e7d7539ba7f');
 });
@@ -404,6 +416,59 @@ test('rejects incomplete server reports', async () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'impulse-server-reports-invalid-'));
   const app = await createPresenceServer({ secret: SECRET, logger: false, reportsDirectory: directory });
   const response = await app.inject({ method: 'POST', url: '/v1/security/server-reports', payload: { category: 'other_security' } });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(readdirSync(directory), []);
+  await app.close();
+});
+
+test('stores anonymous bug reports atomically with optional diagnostics and screenshots', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'impulse-bug-reports-'));
+  const app = await createPresenceServer({ secret: SECRET, logger: false, bugReportsDirectory: directory });
+  const metadata = {
+    schema_version: 1,
+    description: 'The standalone selector stopped while it was checking the server.',
+    installation_id: crypto.randomUUID(),
+    impulse_version: '1.3.0-beta.6', minecraft_version: '1.21.1', loader: 'neoforge',
+    loader_version: '21.1.248', java_version: '21', os: 'Test OS', arch: 'arm64',
+    server_address: 'play.example.com:25565', diagnostics_included: true,
+  };
+  const png = Buffer.from('89504e470d0a1a0a00000000', 'hex');
+  const upload = multipart([
+    { field: 'metadata', name: 'metadata.json', type: 'application/json', value: JSON.stringify(metadata) },
+    { field: 'files', name: 'impulse.log', type: 'text/plain', value: '[INFO] launch failed' },
+    { field: 'files', name: '../../escape.png', type: 'image/png', value: png },
+  ]);
+  const response = await app.inject({
+    method: 'POST', url: '/v1/support/bug-reports',
+    headers: { 'content-type': `multipart/form-data; boundary=${upload.boundary}`, 'user-agent': 'Impulse-Standalone/test' },
+    payload: upload.payload,
+  });
+  assert.equal(response.statusCode, 201, response.body);
+  const folders = readdirSync(directory);
+  assert.equal(folders.length, 1);
+  assert.equal(folders[0].startsWith('.'), false);
+  const report = JSON.parse(readFileSync(path.join(directory, folders[0], 'report.json'), 'utf8'));
+  assert.match(report.source_id, /^[0-9a-f]{64}$/u);
+  assert.match(report.installation_source_id, /^[0-9a-f]{64}$/u);
+  assert.equal(JSON.stringify(report).includes(metadata.installation_id), false);
+  assert.equal(JSON.stringify(report).includes('127.0.0.1'), false);
+  assert.deepEqual(readdirSync(path.join(directory, folders[0], 'attachments')), ['impulse.log']);
+  assert.deepEqual(readdirSync(path.join(directory, folders[0], 'screenshots')), ['screenshot-1.png']);
+  await app.close();
+});
+
+test('rejects diagnostics that were not explicitly included', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'impulse-bug-reports-invalid-'));
+  const app = await createPresenceServer({ secret: SECRET, logger: false, bugReportsDirectory: directory });
+  const upload = multipart([
+    { field: 'metadata', name: 'metadata.json', type: 'application/json', value: JSON.stringify({
+      schema_version: 1, description: 'This report has an attachment without diagnostic consent.',
+      installation_id: crypto.randomUUID(), impulse_version: '1.3.0', minecraft_version: '1.21.1', loader: 'neoforge',
+      diagnostics_included: false,
+    }) },
+    { field: 'files', name: 'minecraft.log', type: 'text/plain', value: 'not allowed' },
+  ]);
+  const response = await app.inject({ method: 'POST', url: '/v1/support/bug-reports', headers: { 'content-type': `multipart/form-data; boundary=${upload.boundary}` }, payload: upload.payload });
   assert.equal(response.statusCode, 400);
   assert.deepEqual(readdirSync(directory), []);
   await app.close();

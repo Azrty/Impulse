@@ -16,8 +16,11 @@ import com.sun.jna.Structure;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
@@ -57,6 +60,8 @@ public final class ImpulseStandaloneUi {
     private static final long IMAGE_CACHE_MAX_BYTES = 100L * 1024L * 1024L;
     private static final long IMAGE_CACHE_MAX_AGE = 30L * 24L * 60L * 60L * 1000L;
     private static final String UPDATES_URL = "https://api.impulsemc.com/v1/standalone/updates";
+    private static final int MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
+    private static final long MAX_CRASH_AGE_MS = 48L * 60L * 60L * 1000L;
     private static final Set<String> UPDATE_ICONS = Set.of("sparkles", "shield-check", "package-plus", "scan-check", "wrench", "rocket", "server", "download");
 
     private final ImpulseStandaloneBootstrap.UiRequest request;
@@ -247,6 +252,8 @@ public final class ImpulseStandaloneUi {
             return Collections.singletonMap("time", System.currentTimeMillis());
         }
         if ("state".equals(action)) return state();
+        if ("bugReportInfo".equals(action)) return bugReportInfo();
+        if ("pickScreenshots".equals(action)) return pickScreenshots();
         if ("selectProfile".equals(action)) {
             currentRestriction = null;
             selectedProfileId = required(command, "profile_id");
@@ -396,6 +403,7 @@ public final class ImpulseStandaloneUi {
                 case "refresh" -> refresh(operation, required(command, "profile_id"));
                 case "delete" -> delete(operation, required(command, "profile_id"));
                 case "report" -> reportServer(operation, command);
+                case "reportBug" -> reportBug(operation, command);
                 case "optional" -> updateOptional(operation, required(command, "profile_id"), strings(command, "ids"));
                 case "play" -> play(operation, required(command, "profile_id"), bool(command, "accept_unverified"));
                 case "searchMods" -> searchMods(operation, command);
@@ -513,6 +521,245 @@ public final class ImpulseStandaloneUi {
         result.put("report_id", response.has("report_id") ? response.get("report_id").getAsString() : "");
         operation.update("Report submitted", 1, 1);
         operation.result = result;
+    }
+
+    private Map<String, Object> bugReportInfo() {
+        BugDiagnostics diagnostics = previousDiagnostics();
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("installation_id", installationId());
+        List<Map<String, Object>> files = new ArrayList<Map<String, Object>>();
+        if (diagnostics != null) for (BugAttachment attachment : diagnostics.attachments) {
+            Map<String, Object> item = new LinkedHashMap<String, Object>();
+            item.put("name", attachment.name);
+            item.put("size", attachment.bytes.length);
+            item.put("kind", attachment.kind);
+            files.add(item);
+        }
+        result.put("attachments", files);
+        return result;
+    }
+
+    private List<Map<String, Object>> pickScreenshots() throws Exception {
+        List<String> command = new ArrayList<String>();
+        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (os.contains("mac")) {
+            command.add("osascript");
+            command.add("-e");
+            command.add("set selectedFiles to choose file with prompt \"Choose screenshots\" with multiple selections allowed");
+            command.add("-e");
+            command.add("set output to \"\"");
+            command.add("-e");
+            command.add("repeat with selectedFile in selectedFiles");
+            command.add("-e");
+            command.add("set output to output & POSIX path of selectedFile & linefeed");
+            command.add("-e");
+            command.add("end repeat");
+            command.add("-e");
+            command.add("return output");
+        } else if (os.contains("win")) {
+            command.add("powershell");
+            command.add("-NoProfile");
+            command.add("-STA");
+            command.add("-Command");
+            command.add("[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Title='Choose screenshots'; $d.Filter='Images|*.png;*.jpg;*.jpeg;*.webp'; $d.Multiselect=$true; if($d.ShowDialog() -eq 'OK'){ $d.FileNames }");
+        } else {
+            command.add("zenity");
+            command.add("--file-selection");
+            command.add("--multiple");
+            command.add("--separator=\n");
+            command.add("--title=Choose screenshots");
+            command.add("--file-filter=Images | *.png *.jpg *.jpeg *.webp");
+        }
+        Process picker;
+        try { picker = new ProcessBuilder(command).redirectErrorStream(true).start(); }
+        catch (IOException error) { throw new IOException("The native screenshot picker could not be opened.", error); }
+        byte[] output = readLimited(picker.getInputStream(), 64 * 1024);
+        int status = picker.waitFor();
+        if (status != 0) return Collections.emptyList();
+        List<Map<String, Object>> selected = new ArrayList<Map<String, Object>>();
+        for (String path : new String(output, StandardCharsets.UTF_8).split("\\R")) {
+            if (path.trim().isEmpty() || selected.size() >= 5) continue;
+            File file = new File(path.trim());
+            if (!file.isFile()) continue;
+            long size = file.length();
+            if (size <= 0 || size > 32L * 1024L * 1024L) throw new IOException(file.getName() + " is too large to process.");
+            byte[] bytes = Files.readAllBytes(file.toPath());
+            String lower = file.getName().toLowerCase(Locale.ROOT);
+            String mime = lower.endsWith(".png") ? "image/png" : lower.endsWith(".webp") ? "image/webp" : "image/jpeg";
+            if (!validImageSignature(bytes, mime)) throw new IOException(file.getName() + " is not a valid PNG, JPEG, or WebP image.");
+            Map<String, Object> image = new LinkedHashMap<String, Object>();
+            image.put("name", file.getName());
+            image.put("mime", mime);
+            image.put("base64", Base64.getEncoder().encodeToString(bytes));
+            selected.add(image);
+        }
+        return selected;
+    }
+
+    private void reportBug(Operation operation, JsonObject command) throws Exception {
+        String description = required(command, "description").trim();
+        if (description.length() < 20 || description.length() > 10000) throw new IOException("The description must contain between 20 and 10,000 characters.");
+        boolean includeDiagnostics = bool(command, "include_diagnostics");
+        List<BugAttachment> attachments = new ArrayList<BugAttachment>();
+        if (includeDiagnostics) {
+            BugDiagnostics diagnostics = previousDiagnostics();
+            if (diagnostics != null) attachments.addAll(diagnostics.attachments);
+        }
+        com.google.gson.JsonArray screenshots = command.has("screenshots") && command.get("screenshots").isJsonArray()
+            ? command.getAsJsonArray("screenshots") : new com.google.gson.JsonArray();
+        if (screenshots.size() > 5) throw new IOException("A bug report can contain at most five screenshots.");
+        int imageIndex = 0;
+        for (JsonElement element : screenshots) {
+            if (!element.isJsonObject()) throw new IOException("Invalid screenshot attachment.");
+            JsonObject image = element.getAsJsonObject();
+            String mime = string(image, "mime");
+            if (!Set.of("image/png", "image/jpeg", "image/webp").contains(mime)) throw new IOException("Unsupported screenshot format.");
+            byte[] bytes;
+            try { bytes = Base64.getDecoder().decode(required(image, "base64")); }
+            catch (IllegalArgumentException error) { throw new IOException("Invalid screenshot encoding.", error); }
+            if (bytes.length == 0 || bytes.length > MAX_SCREENSHOT_BYTES || !validImageSignature(bytes, mime)) throw new IOException("A screenshot is invalid or larger than 5 MiB.");
+            String extension = "image/png".equals(mime) ? "png" : "image/webp".equals(mime) ? "webp" : "jpg";
+            attachments.add(new BugAttachment("screenshot-" + (++imageIndex) + "." + extension, mime, "screenshot", bytes));
+        }
+
+        JsonObject metadata = new JsonObject();
+        metadata.addProperty("schema_version", 1);
+        metadata.addProperty("description", description);
+        metadata.addProperty("installation_id", installationId());
+        metadata.addProperty("impulse_version", clean(request.impulse_version, "unknown"));
+        metadata.addProperty("minecraft_version", clean(request.minecraft_version, "unknown"));
+        metadata.addProperty("loader", clean(request.loader, "unknown"));
+        metadata.addProperty("loader_version", clean(request.loader_version, "unknown"));
+        metadata.addProperty("java_version", System.getProperty("java.version", "unknown"));
+        metadata.addProperty("os", System.getProperty("os.name", "unknown"));
+        metadata.addProperty("arch", System.getProperty("os.arch", "unknown"));
+        metadata.addProperty("diagnostics_included", includeDiagnostics);
+        ImpulseStandaloneBootstrap.Profile profile = selectedProfileId == null ? null : findProfile(
+            ImpulseStandaloneBootstrap.loadStore(gameDirectory), selectedProfileId);
+        metadata.addProperty("server_address", includeDiagnostics && profile != null ? profile.address : "");
+
+        operation.update("Uploading bug report", 0, 1);
+        String reportId = uploadBugReport(metadata, attachments);
+        operation.update("Bug report submitted", 1, 1);
+        operation.result = Map.of("report_submitted", true, "report_id", reportId);
+    }
+
+    private String uploadBugReport(JsonObject metadata, List<BugAttachment> attachments) throws IOException {
+        String boundary = "Impulse-" + UUID.randomUUID();
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        writeMultipart(body, boundary, "metadata", "metadata.json", "application/json", GSON.toJson(metadata).getBytes(StandardCharsets.UTF_8));
+        for (BugAttachment attachment : attachments) writeMultipart(body, boundary, "files", attachment.name, attachment.contentType, attachment.bytes);
+        body.write(("--" + boundary + "--\r\n").getBytes(StandardCharsets.US_ASCII));
+        if (body.size() > 35 * 1024 * 1024) throw new IOException("The complete bug report is larger than 35 MiB.");
+        String apiBase = System.getProperty("impulse.presence.api", "https://api.impulsemc.com").replaceAll("/+$", "");
+        URL endpoint = new URL(apiBase + "/v1/support/bug-reports");
+        if (!"https".equalsIgnoreCase(endpoint.getProtocol()) && !"localhost".equalsIgnoreCase(endpoint.getHost()) && !"127.0.0.1".equals(endpoint.getHost())) {
+            throw new IOException("The Impulse bug report service URL is invalid.");
+        }
+        HttpURLConnection connection = (HttpURLConnection) endpoint.openConnection();
+        connection.setRequestMethod("POST");
+        connection.setDoOutput(true);
+        connection.setConnectTimeout(10000);
+        connection.setReadTimeout(60000);
+        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        connection.setRequestProperty("User-Agent", "Impulse-Standalone/" + clean(request.impulse_version, "unknown"));
+        connection.setFixedLengthStreamingMode(body.size());
+        try (OutputStream output = connection.getOutputStream()) { body.writeTo(output); }
+        int status = connection.getResponseCode();
+        InputStream responseStream = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream();
+        String response = responseStream == null ? "" : new String(readLimited(responseStream, 256 * 1024), StandardCharsets.UTF_8);
+        connection.disconnect();
+        if (status != 201) throw new IOException("Bug report service returned HTTP " + status + (response.isEmpty() ? "." : ": " + response));
+        try { return string(new JsonParser().parse(response).getAsJsonObject(), "report_id"); }
+        catch (Exception error) { throw new IOException("The bug report service returned an invalid response.", error); }
+    }
+
+    private static void writeMultipart(OutputStream output, String boundary, String field, String fileName, String contentType, byte[] bytes) throws IOException {
+        String header = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + field + "\"; filename=\"" + fileName.replace("\"", "")
+            + "\"\r\nContent-Type: " + contentType + "\r\n\r\n";
+        output.write(header.getBytes(StandardCharsets.US_ASCII));
+        output.write(bytes);
+        output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private BugDiagnostics previousDiagnostics() {
+        try {
+            File root = new File(gameDirectory, "impulse/standalone/logs");
+            File current = request.launch_directory == null ? null : new File(request.launch_directory).getCanonicalFile();
+            File[] directories = root.listFiles(File::isDirectory);
+            if (directories == null) return null;
+            List<File> candidates = new ArrayList<File>();
+            for (File directory : directories) if (current == null || !directory.getCanonicalFile().equals(current)) candidates.add(directory);
+            candidates.sort((left, right) -> Long.compare(launchStartedAt(right), launchStartedAt(left)));
+            if (candidates.isEmpty()) return null;
+            File previous = candidates.get(0);
+            File metadataFile = new File(previous, "metadata.json");
+            if (!metadataFile.isFile()) return null;
+            JsonObject metadata = new JsonParser().parse(Files.readString(metadataFile.toPath(), StandardCharsets.UTF_8)).getAsJsonObject();
+            long started = metadata.has("started_at") ? metadata.get("started_at").getAsLong() : 0L;
+            long ended = metadata.has("ended_at") && !metadata.get("ended_at").isJsonNull() ? metadata.get("ended_at").getAsLong() : request.launch_started_at;
+            BugDiagnostics result = new BugDiagnostics();
+            addDiagnostic(result, new File(previous, "impulse.log"), "impulse.log", "text/plain", "impulse-log", 4 * 1024 * 1024);
+            addDiagnostic(result, new File(previous, "minecraft.log"), "minecraft.log", "text/plain", "minecraft-log", 4 * 1024 * 1024);
+            addDiagnostic(result, metadataFile, "metadata.json", "application/json", "metadata", 256 * 1024);
+            File crashDirectory = new File(gameDirectory, "crash-reports");
+            File[] crashes = crashDirectory.listFiles(file -> file.isFile() && file.getName().toLowerCase(Locale.ROOT).endsWith(".txt"));
+            if (crashes != null) {
+                File newest = null;
+                long now = System.currentTimeMillis();
+                for (File crash : crashes) {
+                    long modified = crash.lastModified();
+                    if (modified >= started && modified <= ended + 120000L && now - modified <= MAX_CRASH_AGE_MS && (newest == null || modified > newest.lastModified())) newest = crash;
+                }
+                if (newest != null) addDiagnostic(result, newest, "crash-report.txt", "text/plain", "crash-report", 2 * 1024 * 1024);
+            }
+            return result;
+        } catch (Exception error) {
+            System.err.println("[Impulse UI] Could not inspect previous launch diagnostics: " + error.getMessage());
+            return null;
+        }
+    }
+
+    private static long launchStartedAt(File directory) {
+        try {
+            JsonObject metadata = new JsonParser().parse(Files.readString(new File(directory, "metadata.json").toPath(), StandardCharsets.UTF_8)).getAsJsonObject();
+            return metadata.has("started_at") ? metadata.get("started_at").getAsLong() : directory.lastModified();
+        } catch (Exception ignored) {
+            return directory.lastModified();
+        }
+    }
+
+    private void addDiagnostic(BugDiagnostics diagnostics, File file, String name, String type, String kind, int limit) throws IOException {
+        if (!file.isFile()) return;
+        byte[] bytes = Files.readAllBytes(file.toPath());
+        if (bytes.length > limit) bytes = java.util.Arrays.copyOfRange(bytes, bytes.length - limit, bytes.length);
+        String text = new String(bytes, StandardCharsets.UTF_8);
+        String home = System.getProperty("user.home", "");
+        if (!home.isEmpty()) text = text.replace(home, "<home>");
+        text = text.replaceAll("(?i)(access[_-]?token|authorization|client[_-]?secret)([\\\"'=:\\s]+)[^,\\s\\\"]+", "$1$2<redacted>");
+        text = text.replaceAll("(?i)(--username|setting user:|profile name:)([=:\\s]+)[^,\\s\\\"]+", "$1$2<redacted>");
+        text = text.replaceAll("(?i)(uuid of player\\s+)\\S+", "$1<redacted>");
+        text = text.replaceAll("(?i)(--uuid|uuid)([=:\\s]+)[0-9a-f-]{32,36}", "$1$2<redacted>");
+        text = text.replaceAll("(?i)([?&](?:token|access_token|code|key|secret|password)=)[^&\\s]+", "$1<redacted>");
+        text = text.replaceAll("(?i)\\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\b", "<uuid-redacted>");
+        diagnostics.attachments.add(new BugAttachment(name, type, kind, text.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private String installationId() {
+        JsonObject settings = loadStandaloneSettings();
+        String existing = string(settings, "bug_installation_id");
+        if (existing.matches("[0-9a-fA-F-]{36}")) return existing;
+        String created = UUID.randomUUID().toString();
+        settings.addProperty("bug_installation_id", created);
+        try { writeJsonAtomic(new File(gameDirectory, "impulse/standalone/settings.json"), settings); }
+        catch (IOException error) { System.err.println("[Impulse UI] Could not persist anonymous bug-report ID: " + error.getMessage()); }
+        return created;
+    }
+
+    private static boolean validImageSignature(byte[] bytes, String mime) {
+        if ("image/png".equals(mime)) return bytes.length >= 8 && (bytes[0] & 255) == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4e && bytes[3] == 0x47;
+        if ("image/jpeg".equals(mime)) return bytes.length >= 3 && (bytes[0] & 255) == 0xff && (bytes[1] & 255) == 0xd8 && (bytes[2] & 255) == 0xff;
+        return bytes.length >= 12 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F' && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P';
     }
 
     private void play(Operation operation, String profileId, boolean acceptUnverified) throws Exception {
@@ -1200,6 +1447,8 @@ public final class ImpulseStandaloneUi {
             this.message = clean(message, "Working");
             this.completed = Math.max(0, completed);
             this.total = Math.max(1, total);
+            System.out.println("[" + Instant.now() + "] [INFO] [ui:" + kind + "] " + this.message
+                + " | completed=" + this.completed + " total=" + this.total);
         }
         void attach(Future<?> future) {
             this.future = future;
@@ -1222,6 +1471,24 @@ public final class ImpulseStandaloneUi {
         volatile String status = "loading";
         volatile String data;
         volatile String error;
+    }
+
+    private static final class BugDiagnostics {
+        final List<BugAttachment> attachments = new ArrayList<BugAttachment>();
+    }
+
+    private static final class BugAttachment {
+        final String name;
+        final String contentType;
+        final String kind;
+        final byte[] bytes;
+
+        BugAttachment(String name, String contentType, String kind, byte[] bytes) {
+            this.name = name;
+            this.contentType = contentType;
+            this.kind = kind;
+            this.bytes = bytes;
+        }
     }
 
     private interface WindowsUser32 extends Library {

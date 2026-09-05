@@ -1,10 +1,11 @@
 import crypto from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
+import multipart from '@fastify/multipart';
 
 const CHALLENGE_TTL_MS = 90_000;
 const PRESENCE_TTL_MS = 120_000;
@@ -45,6 +46,9 @@ export type PresenceServerOptions = {
   curseForgeApiKey?: string;
   curseForgeFetch?: typeof fetch;
   reportsDirectory?: string;
+  bugReportsDirectory?: string;
+  bugReportRetentionDays?: number;
+  bugReportMaxStorageBytes?: number;
   launcherAvailabilityFile?: string;
 };
 
@@ -325,9 +329,56 @@ async function queryCurseForgeFingerprints(
   throw lastError;
 }
 
+function detectUploadedImage(bytes: Buffer): 'image/png' | 'image/jpeg' | 'image/webp' | null {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes.subarray(1, 4).toString('ascii') === 'PNG') return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
+}
+
+async function directorySize(directory: string): Promise<number> {
+  let total = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) total += await directorySize(target);
+    else if (entry.isFile()) total += (await stat(target)).size;
+  }
+  return total;
+}
+
+async function cleanBugReports(directory: string, currentTime: number, retentionMs: number, maxBytes: number): Promise<void> {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  const reports: Array<{ directory: string; modified: number; size: number }> = [];
+  for (const entry of entries) {
+    const target = path.join(directory, entry.name);
+    if (!entry.isDirectory()) continue;
+    const details = await stat(target).catch(() => null);
+    if (!details) continue;
+    if (entry.name.startsWith('.') && entry.name.endsWith('.tmp')) {
+      if (currentTime - details.mtimeMs > 60 * 60 * 1000) await rm(target, { recursive: true, force: true });
+      continue;
+    }
+    if (currentTime - details.mtimeMs > retentionMs) {
+      await rm(target, { recursive: true, force: true });
+      continue;
+    }
+    reports.push({ directory: target, modified: details.mtimeMs, size: await directorySize(target) });
+  }
+  reports.sort((left, right) => left.modified - right.modified);
+  let total = reports.reduce((sum, report) => sum + report.size, 0);
+  for (const report of reports) {
+    if (total <= maxBytes) break;
+    await rm(report.directory, { recursive: true, force: true });
+    total -= report.size;
+  }
+}
+
 export async function createPresenceServer(options: PresenceServerOptions): Promise<FastifyInstance> {
   if (options.secret.length < 32) throw new Error('PRESENCE_JWT_SECRET must contain at least 32 characters.');
   const app = Fastify({ logger: options.logger ?? true, bodyLimit: 64 * 1024 });
+  await app.register(multipart, {
+    limits: { files: 10, fields: 0, parts: 10, fileSize: 5 * 1024 * 1024, headerPairs: 100 },
+  });
   const now = options.now ?? Date.now;
   const verifyMojang = options.verifyMojang ?? defaultMojangVerifier;
   const challenges = new Map<string, Challenge>();
@@ -337,6 +388,12 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   const tokenRates = new Map<string, RateBucket>();
   const curseForgeRequests = new Map<string, Promise<Map<number, CurseForgeFile>>>();
   const reportsDirectory = path.resolve(options.reportsDirectory ?? path.join(process.cwd(), 'reports'));
+  const bugReportsDirectory = path.resolve(options.bugReportsDirectory ?? path.join(reportsDirectory, 'bugs'));
+  const bugReportRetentionMs = Math.max(1, options.bugReportRetentionDays ?? 90) * 24 * 60 * 60 * 1000;
+  const bugReportMaxStorageBytes = Math.max(35 * 1024 * 1024, options.bugReportMaxStorageBytes ?? 20 * 1024 * 1024 * 1024);
+  if (await stat(bugReportsDirectory).then(value => value.isDirectory()).catch(() => false)) {
+    await cleanBugReports(bugReportsDirectory, now(), bugReportRetentionMs, bugReportMaxStorageBytes);
+  }
   const registryPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/recognized-mods.json');
   let recognizedMods: { schema_version: number; mods: Record<string, { name: string }> } = { schema_version: 1, mods: {} };
   try { recognizedMods = JSON.parse(await readFile(registryPath, 'utf8')); } catch (error) { app.log.warn({ error }, 'Unable to read recognized mod registry'); }
@@ -428,6 +485,101 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     max: 120,
     timeWindow: '1 minute',
     keyGenerator: (request) => request.ip,
+  });
+
+  app.post('/v1/support/bug-reports', { config: { rateLimit: { max: 3, timeWindow: '24 hours' } } }, async (request, reply) => {
+    const received: Array<{ filename: string; contentType: string; bytes: Buffer }> = [];
+    let metadata: Record<string, unknown> | null = null;
+    let receivedBytes = 0;
+    try {
+      for await (const part of request.parts()) {
+        if (part.type !== 'file' || !['metadata', 'files'].includes(part.fieldname)) {
+          return reply.code(400).send({ error: 'Unexpected bug report field.' });
+        }
+        const bytes = await part.toBuffer();
+        receivedBytes += bytes.length;
+        if (receivedBytes > 35 * 1024 * 1024) return reply.code(413).send({ error: 'The complete bug report is larger than 35 MiB.' });
+        if (part.file.truncated) return reply.code(413).send({ error: 'A bug report attachment is too large.' });
+        if (part.fieldname === 'metadata') {
+          if (metadata || bytes.length > 64 * 1024 || part.mimetype !== 'application/json') return reply.code(400).send({ error: 'Invalid bug report metadata.' });
+          metadata = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
+        } else {
+          received.push({ filename: path.basename(part.filename ?? ''), contentType: part.mimetype, bytes });
+        }
+      }
+    } catch (error) {
+      request.log.warn({ error }, 'Rejected malformed bug report upload');
+      return reply.code(400).send({ error: 'The bug report upload is malformed.' });
+    }
+
+    const description = cleanReportText(metadata?.description, 10_000);
+    const installationId = cleanReportText(metadata?.installation_id, 64);
+    const impulseVersion = cleanReportText(metadata?.impulse_version, 64);
+    const minecraftVersion = cleanReportText(metadata?.minecraft_version, 64);
+    const loader = cleanReportText(metadata?.loader, 32).toLowerCase();
+    const diagnosticsIncluded = metadata?.diagnostics_included === true;
+    if (metadata?.schema_version !== 1 || description.length < 20 || !/^[0-9a-f-]{36}$/iu.test(installationId)
+      || !impulseVersion || !minecraftVersion || !['forge', 'neoforge'].includes(loader)) {
+      return reply.code(400).send({ error: 'The bug report metadata is incomplete or invalid.' });
+    }
+
+    let screenshots = 0;
+    const accepted: Array<{ name: string; contentType: string; bytes: Buffer; directory: 'attachments' | 'screenshots' }> = [];
+    const diagnosticNames = new Map([
+      ['impulse.log', 4 * 1024 * 1024], ['minecraft.log', 4 * 1024 * 1024],
+      ['metadata.json', 256 * 1024], ['crash-report.txt', 2 * 1024 * 1024],
+    ]);
+    for (const file of received) {
+      const diagnosticLimit = diagnosticNames.get(file.filename);
+      if (diagnosticLimit !== undefined) {
+        if (!diagnosticsIncluded) return reply.code(400).send({ error: 'Diagnostics were attached without consent.' });
+        if (!['text/plain', 'application/json'].includes(file.contentType) || file.bytes.length === 0 || file.bytes.length > diagnosticLimit) {
+          return reply.code(400).send({ error: `Invalid diagnostic attachment: ${file.filename}` });
+        }
+        accepted.push({ ...file, name: file.filename, directory: 'attachments' });
+        continue;
+      }
+      const imageType = detectUploadedImage(file.bytes);
+      if (!imageType || imageType !== file.contentType || file.bytes.length === 0 || file.bytes.length > 5 * 1024 * 1024 || ++screenshots > 5) {
+        return reply.code(400).send({ error: 'Invalid screenshot attachment.' });
+      }
+      const extension = imageType === 'image/png' ? 'png' : imageType === 'image/webp' ? 'webp' : 'jpg';
+      accepted.push({ ...file, name: `screenshot-${screenshots}.${extension}`, directory: 'screenshots' });
+    }
+
+    const reportId = crypto.randomUUID();
+    const submittedAt = new Date(now()).toISOString();
+    const sourceId = crypto.createHmac('sha256', options.secret).update(request.ip).digest('hex');
+    const installationSourceId = crypto.createHmac('sha256', options.secret).update(`installation:${installationId}`).digest('hex');
+    const report = {
+      schema_version: 1, report_id: reportId, submitted_at: submittedAt, description,
+      environment: {
+        impulse_version: impulseVersion, minecraft_version: minecraftVersion, loader,
+        loader_version: cleanReportText(metadata?.loader_version, 64), java_version: cleanReportText(metadata?.java_version, 64),
+        os: cleanReportText(metadata?.os, 128), arch: cleanReportText(metadata?.arch, 64),
+        server_address: diagnosticsIncluded ? cleanReportText(metadata?.server_address, 320) : '', diagnostics_included: diagnosticsIncluded,
+      },
+      source_id: sourceId, installation_source_id: installationSourceId,
+      user_agent: cleanReportText(request.headers['user-agent'], 200),
+      attachments: accepted.map(file => ({ name: file.name, type: file.contentType, size: file.bytes.length, kind: file.directory })),
+    };
+    await mkdir(bugReportsDirectory, { recursive: true, mode: 0o700 });
+    const staging = path.join(bugReportsDirectory, `.${reportId}.tmp`);
+    const target = path.join(bugReportsDirectory, reportId);
+    try {
+      await mkdir(path.join(staging, 'attachments'), { recursive: true, mode: 0o700 });
+      await mkdir(path.join(staging, 'screenshots'), { recursive: true, mode: 0o700 });
+      await writeFile(path.join(staging, 'report.json'), `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      for (const file of accepted) await writeFile(path.join(staging, file.directory, file.name), file.bytes, { mode: 0o600, flag: 'wx' });
+      await rename(staging, target);
+      await cleanBugReports(bugReportsDirectory, now(), bugReportRetentionMs, bugReportMaxStorageBytes);
+    } catch (error) {
+      await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+      request.log.error({ error, reportId }, 'Unable to persist bug report');
+      return reply.code(500).send({ error: 'The bug report could not be saved. Please try again later.' });
+    }
+    request.log.info({ reportId, attachments: accepted.length }, 'Anonymous standalone bug report received');
+    return reply.code(201).send({ report_id: reportId, status: 'received' });
   });
 
   app.post('/v1/security/server-reports', { config: { rateLimit: { max: 5, timeWindow: '24 hours' } } }, async (request, reply) => {

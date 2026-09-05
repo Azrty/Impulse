@@ -8,8 +8,10 @@ test('the published standalone update registry is valid', async () => {
   const value = JSON.parse(await readFile(resolve(process.cwd(), 'data/standalone-updates.json'), 'utf8'));
   const result = sanitizeStandaloneUpdates(value);
   assert.equal(result.schema_version, 1);
-  assert.equal(result.publications[0]?.id, 'new-ui-impulse');
-  assert.ok(result.publications[0]?.versions.includes('1.3.0'));
+  const publication = result.publications.find(item => item.versions.includes('1.3.0'));
+  assert.ok(publication, 'Expected an update publication targeting Impulse 1.3.0.');
+  assert.equal(publication.title, 'We fixed Impulse!');
+  assert.ok(publication.sections.length > 0);
 });
 
 test('standalone updates reject duplicate ids and unsafe images', () => {
