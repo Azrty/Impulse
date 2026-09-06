@@ -12,6 +12,7 @@ import type { CustomMod, GlobalMod, InstallPlan, Manifest, Mod, Operation, Profi
 type Tab = 'overview' | 'mods';
 type ModView = 'installed' | 'search' | 'project' | 'versions';
 type Warning = { mods: Mod[]; signature: string };
+type CrashWheelResult = { required: boolean; sector: number; crash: boolean; duration_ms: number; passed?: boolean };
 
 let developerToolsInitialized = false;
 function showDeveloperTools() {
@@ -80,6 +81,7 @@ export function App() {
   const [newsOpen, setNewsOpen] = useState(false);
   const [bugReportOpen, setBugReportOpen] = useState(false);
   const [developerToolsOpen, setDeveloperToolsOpen] = useState(false);
+  const [crashWheel, setCrashWheel] = useState<CrashWheelResult>();
   const pollRef = useRef<number | undefined>(undefined);
   const updatesRefreshed = useRef(false);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -264,9 +266,19 @@ export function App() {
     setTab('overview');
   };
 
-  const launch = (acceptUnverified = false) => {
+  const launch = async (acceptUnverified = false) => {
     setProfileMenuOpen(false);
-    if (profile) start('play', { profile_id: profile.id, accept_unverified: acceptUnverified });
+    if (!profile) return;
+    try {
+      const wheel = await invoke<CrashWheelResult>('crashWheel');
+      if (wheel.required && !wheel.passed) {
+        setCrashWheel(wheel);
+        return;
+      }
+      start('play', { profile_id: profile.id, accept_unverified: acceptUnverified });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
   };
   const cancelLaunch = async () => {
     if (!operation?.id || operation.kind !== 'play' || operation.status !== 'running') return;
@@ -314,7 +326,7 @@ export function App() {
               </div>
               <div className="playbar">
                 <button className="icon-button" title="Refresh server" disabled={busy} onClick={() => start('refresh', { profile_id: profile.id })}><RefreshCw size={18} /></button>
-                <button className="play-button" disabled={busy || !manifest} onClick={() => launch(false)}>
+                <button className="play-button" disabled={busy || !manifest} onClick={() => void launch(false)}>
                   <span className="play-fill" style={{ width: busy ? `${Math.max(5, progress * 100)}%` : '0%' }} />
                   <span className="play-content">{busy ? <LoaderCircle className="spin" size={19} /> : <Play size={19} fill="currentColor" />}<span className="play-label">{busy ? operation?.message : 'Play'}</span></span>
                 </button>
@@ -340,13 +352,67 @@ export function App() {
       {deleteOpen && profile && <Confirm title="Remove this server?" text="This removes its managed files and settings. Your global mods are not changed." confirm="Remove server" destructive onClose={() => setDeleteOpen(false)} onConfirm={() => { setDeleteOpen(false); start('delete', { profile_id: profile.id }); }} />}
       {reportOpen && profile && <ReportServer profile={profile} busy={busy} onClose={() => setReportOpen(false)} onSubmit={(category, details) => { setReportOpen(false); start('report', { profile_id: profile.id, category, details }); }} />}
       {optionalOpen && profile && manifest && <OptionalMods profile={profile} manifest={manifest} onClose={() => setOptionalOpen(false)} onSave={ids => { setOptionalOpen(false); start('optional', { profile_id: profile.id, ids }); }} />}
-      {warning && <VerificationWarning warning={warning} onCancel={() => setWarning(undefined)} onContinue={() => { setWarning(undefined); launch(true); }} />}
+      {warning && <VerificationWarning warning={warning} onCancel={() => setWarning(undefined)} onContinue={() => { setWarning(undefined); void launch(true); }} />}
       {modManagerOpen && profile && <ModManager profile={profile} state={state} start={start} operation={operation} onClose={async () => { setModManagerOpen(false); await loadState(); }} />}
       {settingsOpen && <StandaloneSettings state={state} developerToolsOpen={developerToolsOpen} onToggleDeveloperTools={toggleDeveloperTools} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onNews={() => { setSettingsOpen(false); setNewsOpen(true); }} onReportBug={() => { setSettingsOpen(false); setBugReportOpen(true); }} />}
       {newsOpen && <NewsHistory publications={state.publications || []} currentVersion={state.impulse_version} dismissed={state.dismissed_update_ids || []} onClose={() => setNewsOpen(false)} />}
       {bugReportOpen && <BugReport operation={operation?.kind === 'reportBug' ? operation : undefined} onClose={() => setBugReportOpen(false)} onSubmit={(description, includeDiagnostics, screenshots) => start('reportBug', { description, include_diagnostics: includeDiagnostics, screenshots })} />}
+      {crashWheel && profile && <CrashWheel round={crashWheel} onSurvived={async () => {
+        setCrashWheel(undefined);
+        start('play', { profile_id: profile.id, accept_unverified: false });
+      }} onError={message => { setCrashWheel(undefined); setError(message); }} />}
     </div>
   );
+}
+
+function CrashWheel({ round, onSurvived, onError }: { round: CrashWheelResult; onSurvived: () => Promise<void>; onError: (message: string) => void }) {
+  const [remaining, setRemaining] = useState(Math.ceil(round.duration_ms / 1000));
+  const [revealed, setRevealed] = useState(false);
+  const onSurvivedRef = useRef(onSurvived);
+  const onErrorRef = useRef(onError);
+  const labels = ['CRASH', 'PLAY', 'CRASH', 'PLAY', 'CRASH'];
+  const endRotation = 7 * 360 - (round.sector * 72 + 36);
+  useEffect(() => { onSurvivedRef.current = onSurvived; }, [onSurvived]);
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  useEffect(() => {
+    const started = performance.now();
+    let finish: number | undefined;
+    const ticker = window.setInterval(() => setRemaining(Math.max(0, Math.ceil((round.duration_ms - (performance.now() - started)) / 1000))), 100);
+    const reveal = window.setTimeout(() => {
+      window.clearInterval(ticker);
+      setRemaining(0);
+      setRevealed(true);
+      finish = window.setTimeout(async () => {
+        try {
+          const result = await invoke<{ crash: boolean }>('completeCrashWheel');
+          if (!result.crash) await onSurvivedRef.current();
+        } catch (reason) { onErrorRef.current(reason instanceof Error ? reason.message : String(reason)); }
+      }, 1000);
+    }, round.duration_ms);
+    return () => {
+      window.clearInterval(ticker);
+      window.clearTimeout(reveal);
+      if (finish !== undefined) window.clearTimeout(finish);
+    };
+  }, [round.duration_ms]);
+  return <div className={`crash-wheel-screen ${revealed ? (round.crash ? 'lost' : 'won') : 'spinning'}`}>
+    <div className="crash-wheel-glow" />
+    <header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong><span>Crash Wheel</span></div></header>
+    <main>
+      <div className="crash-wheel-copy"><span className="eyebrow">A special challenge</span><h1>You’ve been selected for the Crash Wheel!</h1><p>3 out of 5 outcomes will close Minecraft. Land on Play to continue.</p></div>
+      <div className="wheel-stage">
+        <div className="wheel-pointer" />
+        <div className="wheel" style={{ '--wheel-end': `${endRotation}deg`, '--wheel-duration': `${round.duration_ms}ms` } as React.CSSProperties}>
+          {labels.map((label, index) => <span key={index} className={label === 'PLAY' ? 'play-sector' : ''} style={{ transform: `rotate(${index * 72 + 36}deg) translateY(-42%)` }}>{label}</span>)}
+          <div className="wheel-hub"><img src={impulseLogo} alt="" /></div>
+        </div>
+        {revealed && <div className="wheel-particles">{Array.from({ length: 18 }, (_, index) => <i key={index} style={{ '--particle': index } as React.CSSProperties} />)}</div>}
+      </div>
+      <div className="wheel-result" aria-live="polite">
+        {revealed ? <><strong>{round.crash ? 'Crash! Better luck next launch.' : 'You survived. Let’s play!'}</strong><small>{round.crash ? 'Closing Minecraft…' : 'Preparing your server…'}</small></> : <><strong>The wheel is spinning</strong><small>{remaining > 0 ? `${remaining} second${remaining === 1 ? '' : 's'}…` : 'And the result is…'}</small></>}
+      </div>
+    </main>
+  </div>;
 }
 
 function Boot({ error }: { error: string }) {

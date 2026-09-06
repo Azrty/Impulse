@@ -29,6 +29,7 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -62,6 +63,7 @@ public final class ImpulseStandaloneUi {
     private static final String UPDATES_URL = "https://api.impulsemc.com/v1/standalone/updates";
     private static final int MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
     private static final long MAX_CRASH_AGE_MS = 48L * 60L * 60L * 1000L;
+    private static final long CRASH_WHEEL_DURATION_MS = 10000L;
     private static final Set<String> UPDATE_ICONS = Set.of("sparkles", "shield-check", "package-plus", "scan-check", "wrench", "rocket", "server", "download");
 
     private final ImpulseStandaloneBootstrap.UiRequest request;
@@ -88,6 +90,13 @@ public final class ImpulseStandaloneUi {
     private volatile boolean developerToolsActive;
     private volatile ImpulseStandaloneBootstrap.RestrictedServerException currentRestriction;
     private volatile UpdateRegistry updateRegistry;
+    private final SecureRandom crashWheelRandom = new SecureRandom();
+    private volatile boolean crashWheelChecked;
+    private volatile boolean crashWheelRequired;
+    private volatile boolean crashWheelPassed;
+    private volatile boolean crashWheelCrash;
+    private volatile int crashWheelSector = -1;
+    private volatile long crashWheelStartedAt;
 
     private ImpulseStandaloneUi(ImpulseStandaloneBootstrap.UiRequest request) {
         this.request = request;
@@ -254,6 +263,8 @@ public final class ImpulseStandaloneUi {
         if ("state".equals(action)) return state();
         if ("bugReportInfo".equals(action)) return bugReportInfo();
         if ("pickScreenshots".equals(action)) return pickScreenshots();
+        if ("crashWheel".equals(action)) return crashWheel();
+        if ("completeCrashWheel".equals(action)) return completeCrashWheel();
         if ("selectProfile".equals(action)) {
             currentRestriction = null;
             selectedProfileId = required(command, "profile_id");
@@ -369,6 +380,84 @@ public final class ImpulseStandaloneUi {
             }
         }
         return state;
+    }
+
+    private synchronized Map<String, Object> crashWheel() {
+        if (!crashWheelChecked) {
+            crashWheelChecked = true;
+            boolean eligible = crashWheelEligible();
+            crashWheelRequired = eligible;
+            crashWheelPassed = !eligible;
+            if (eligible) {
+                crashWheelSector = crashWheelRandom.nextInt(5);
+                crashWheelCrash = crashWheelSector == 0 || crashWheelSector == 2 || crashWheelSector == 4;
+                crashWheelStartedAt = System.currentTimeMillis();
+                System.out.println("[Impulse UI] Crash Wheel started for an eligible participant; sector=" + crashWheelSector + ".");
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("required", crashWheelRequired);
+        result.put("sector", crashWheelSector);
+        result.put("crash", crashWheelCrash);
+        result.put("duration_ms", CRASH_WHEEL_DURATION_MS);
+        result.put("passed", crashWheelPassed);
+        return result;
+    }
+
+    private boolean crashWheelEligible() {
+        String username = clean(request.username, "");
+        if (!username.matches("[A-Za-z0-9_]{3,16}")) return false;
+        HttpURLConnection connection = null;
+        try {
+            String apiBase = System.getProperty("impulse.presence.api", "https://api.impulsemc.com").replaceAll("/+$", "");
+            URL endpoint = new URL(apiBase + "/v1/standalone/crash-wheel");
+            connection = (HttpURLConnection) endpoint.openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("User-Agent", "Impulse-Standalone/" + clean(request.impulse_version, "unknown"));
+            JsonObject body = new JsonObject();
+            body.addProperty("username", username);
+            byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+            connection.setFixedLengthStreamingMode(bytes.length);
+            try (OutputStream output = connection.getOutputStream()) { output.write(bytes); }
+            if (connection.getResponseCode() != 200) return false;
+            try (InputStream input = connection.getInputStream()) {
+                JsonObject response = new JsonParser().parse(new String(readLimited(input, 16 * 1024), StandardCharsets.UTF_8)).getAsJsonObject();
+                return response.has("eligible") && response.get("eligible").getAsBoolean();
+            }
+        } catch (Exception error) {
+            System.err.println("[Impulse UI] Crash Wheel eligibility check unavailable: " + error.getMessage());
+            return false;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private synchronized Map<String, Object> completeCrashWheel() throws IOException {
+        if (!crashWheelRequired || crashWheelSector < 0) throw new IOException("No Crash Wheel round is active.");
+        long remaining = CRASH_WHEEL_DURATION_MS - (System.currentTimeMillis() - crashWheelStartedAt);
+        if (remaining > 0L) throw new IOException("The Crash Wheel is still spinning.");
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("crash", crashWheelCrash);
+        if (crashWheelCrash) {
+            writeResult("quit", null, null);
+            completed = true;
+            result.put("closed", true);
+            Thread closer = new Thread(() -> {
+                try { Thread.sleep(250L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                closeWindow();
+            }, "impulse-crash-wheel-close");
+            closer.setDaemon(true);
+            closer.start();
+        } else {
+            crashWheelPassed = true;
+            result.put("closed", false);
+        }
+        return result;
     }
 
     private String startOperation(String kind, JsonObject command) throws IOException {
@@ -763,6 +852,8 @@ public final class ImpulseStandaloneUi {
     }
 
     private void play(Operation operation, String profileId, boolean acceptUnverified) throws Exception {
+        crashWheel();
+        if (crashWheelRequired && !crashWheelPassed) throw new IOException("Complete the Crash Wheel before launching.");
         ensureLaunchActive(operation);
         currentRestriction = null;
         ImpulseStandaloneBootstrap.Profile profile = requireProfile(profileId);

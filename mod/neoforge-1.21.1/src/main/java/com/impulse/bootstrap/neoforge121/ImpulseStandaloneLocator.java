@@ -42,7 +42,8 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
                 gameDirectory,
                 FMLLoader.versionInfo().mcVersion(),
                 "neoforge",
-                FMLLoader.versionInfo().neoForgeVersion()
+                FMLLoader.versionInfo().neoForgeVersion(),
+                minecraftUsername()
             );
             if (uiOutcome == ImpulseStandaloneBootstrap.UiOutcome.QUIT) {
                 System.exit(0);
@@ -79,6 +80,23 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
     @Override
     public String toString() {
         return "impulse-standalone";
+    }
+
+    private static String minecraftUsername() {
+        try {
+            String[] arguments = ProcessHandle.current().info().arguments().orElse(new String[0]);
+            for (int index = 0; index + 1 < arguments.length; index++) {
+                if ("--username".equals(arguments[index]) && arguments[index + 1].matches("[A-Za-z0-9_]{3,16}")) {
+                    return arguments[index + 1];
+                }
+            }
+        } catch (Throwable ignored) { }
+        try {
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?:^|\\s)--username\\s+([A-Za-z0-9_]{3,16})(?:\\s|$)")
+                .matcher(System.getProperty("sun.java.command", ""));
+            if (matcher.find()) return matcher.group(1);
+        } catch (Throwable ignored) { }
+        return "";
     }
 
     private static final class NeoForgeProgressReporter implements ImpulseStandaloneBootstrap.ProgressReporter {

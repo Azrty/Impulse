@@ -101,6 +101,10 @@ public final class ImpulseStandaloneBootstrap {
     }
 
     public static UiOutcome configureWithNativeUi(final File gameDirectory, final String minecraftVersion, final String loader, final String loaderVersion) {
+        return configureWithNativeUi(gameDirectory, minecraftVersion, loader, loaderVersion, "");
+    }
+
+    public static UiOutcome configureWithNativeUi(final File gameDirectory, final String minecraftVersion, final String loader, final String loaderVersion, final String username) {
         progressReporter.begin("Impulse: waiting for profile selection", 1);
         Process process = null;
         File sessionDirectory = null;
@@ -121,6 +125,7 @@ public final class ImpulseStandaloneBootstrap {
             request.assets_directory = bundle.assetsDirectory.getAbsolutePath();
             request.parent_pid = currentProcessId();
             request.impulse_version = currentImpulseVersion();
+            request.username = clean(username, "");
             request.launch_log_path = StandaloneLaunchLog.currentLogPath();
             request.launch_directory = StandaloneLaunchLog.currentLaunchDirectory();
             request.launch_started_at = StandaloneLaunchLog.currentStartedAt();
@@ -2020,6 +2025,7 @@ public final class ImpulseStandaloneBootstrap {
         public String assets_directory;
         public long parent_pid;
         public String impulse_version;
+        public String username;
         public String launch_log_path;
         public String launch_directory;
         public long launch_started_at;

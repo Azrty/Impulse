@@ -27,6 +27,35 @@ test('matches Minecraft offline UUID generation', () => {
   assert.equal(minecraftOfflineUuid('Notch'), 'b50ad385829d3141a2167e7d7539ba7f');
 });
 
+test('returns Crash Wheel eligibility without exposing its registry', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'impulse-crash-wheel-api-'));
+  const file = path.join(directory, 'crash-wheel.json');
+  writeFileSync(file, '{"schema_version":1,"usernames":["PlayerOne"]}\n');
+  const app = await createPresenceServer({ secret: SECRET, logger: false, crashWheelFile: file });
+  const eligible = await app.inject({ method: 'POST', url: '/v1/standalone/crash-wheel', payload: { username: 'playerone' } });
+  assert.equal(eligible.statusCode, 200);
+  assert.deepEqual(eligible.json(), { eligible: true });
+  assert.equal(JSON.stringify(eligible.json()).includes('PlayerOne'), false);
+  const other = await app.inject({ method: 'POST', url: '/v1/standalone/crash-wheel', payload: { username: 'OtherPlayer' } });
+  assert.deepEqual(other.json(), { eligible: false });
+  writeFileSync(file, '{"schema_version":1,"usernames":["OtherPlayer"]}\n');
+  const updated = await app.inject({ method: 'POST', url: '/v1/standalone/crash-wheel', payload: { username: 'otherplayer' } });
+  assert.deepEqual(updated.json(), { eligible: true });
+  writeFileSync(file, '{"schema_version":1,"active_until":"1970-01-01T00:00:00.000Z","usernames":["OtherPlayer"]}\n');
+  const expired = await app.inject({ method: 'POST', url: '/v1/standalone/crash-wheel', payload: { username: 'otherplayer' } });
+  assert.deepEqual(expired.json(), { eligible: false });
+  writeFileSync(file, '{"schema_version":1,"usernames":["OtherPlayer"]}\n');
+  const invalid = await app.inject({ method: 'POST', url: '/v1/standalone/crash-wheel', payload: { username: '../bad' } });
+  assert.equal(invalid.statusCode, 400);
+  for (let request = 0; request < 25; request += 1) {
+    const response = await app.inject({ method: 'POST', url: '/v1/standalone/crash-wheel', payload: { username: 'OtherPlayer' } });
+    assert.equal(response.statusCode, 200);
+  }
+  const limited = await app.inject({ method: 'POST', url: '/v1/standalone/crash-wheel', payload: { username: 'OtherPlayer' } });
+  assert.equal(limited.statusCode, 429);
+  await app.close();
+});
+
 test('keeps CurseForge verification disabled without an Impulse API key', async () => {
   const app = await createPresenceServer({ secret: SECRET, logger: false });
   const response = await app.inject({

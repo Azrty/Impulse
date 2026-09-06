@@ -50,6 +50,7 @@ export type PresenceServerOptions = {
   bugReportRetentionDays?: number;
   bugReportMaxStorageBytes?: number;
   launcherAvailabilityFile?: string;
+  crashWheelFile?: string;
 };
 
 type LauncherAvailability = { schema_version: 1; isLauncherAvailable: boolean };
@@ -379,6 +380,12 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   await app.register(multipart, {
     limits: { files: 10, fields: 0, parts: 10, fileSize: 5 * 1024 * 1024, headerPairs: 100 },
   });
+  await app.register(rateLimit, {
+    global: true,
+    max: 120,
+    timeWindow: '1 minute',
+    keyGenerator: (request) => request.ip,
+  });
   const now = options.now ?? Date.now;
   const verifyMojang = options.verifyMojang ?? defaultMojangVerifier;
   const challenges = new Map<string, Challenge>();
@@ -432,6 +439,25 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   } catch (error) {
     app.log.warn({ error }, 'Unable to read launcher availability registry; defaulting to unavailable');
   }
+  const crashWheelPath = path.resolve(options.crashWheelFile
+    ?? path.join(process.cwd(), 'data', 'crash-wheel.json'));
+
+  async function crashWheelEligible(username: string): Promise<boolean> {
+    try {
+      const registry = JSON.parse(await readFile(crashWheelPath, 'utf8')) as { schema_version?: unknown; active_until?: unknown; usernames?: unknown };
+      if (registry.schema_version !== 1 || !Array.isArray(registry.usernames)) throw new Error('Invalid Crash Wheel registry.');
+      if (registry.active_until !== undefined) {
+        const activeUntil = typeof registry.active_until === 'string' ? Date.parse(registry.active_until) : Number.NaN;
+        if (!Number.isFinite(activeUntil)) throw new Error('Invalid Crash Wheel expiration.');
+        if (now() >= activeUntil) return false;
+      }
+      const target = username.toLowerCase();
+      return registry.usernames.some(value => typeof value === 'string' && value.toLowerCase() === target);
+    } catch (error) {
+      app.log.warn({ error }, 'Unable to read Crash Wheel registry; allowing launch');
+      return false;
+    }
+  }
   async function currentLauncherAvailability(): Promise<LauncherAvailability> {
     try {
       launcherAvailability = sanitizeLauncherAvailability(JSON.parse(await readFile(launcherAvailabilityPath, 'utf8')));
@@ -470,6 +496,15 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     return { isLauncherAvailable: availability.isLauncherAvailable };
   });
 
+  app.post('/v1/standalone/crash-wheel', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const body = request.body as Record<string, unknown> | null;
+    const username = cleanReportText(body?.username, 16);
+    if (!/^[A-Za-z0-9_]{3,16}$/u.test(username)) return reply.code(400).send({ error: 'Invalid Minecraft username.' });
+    return { eligible: await crashWheelEligible(username) };
+  });
+
   // Older Impulse clients sent bodyless POST requests through HttpURLConnection,
   // which labels them as form data. Accept only an empty form for compatibility.
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (_request, body, done) => {
@@ -478,13 +513,6 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
       return;
     }
     done(null, {});
-  });
-
-  await app.register(rateLimit, {
-    global: true,
-    max: 120,
-    timeWindow: '1 minute',
-    keyGenerator: (request) => request.ip,
   });
 
   app.post('/v1/support/bug-reports', { config: { rateLimit: { max: 3, timeWindow: '24 hours' } } }, async (request, reply) => {

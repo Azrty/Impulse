@@ -19,7 +19,10 @@
     "servers:unblock": "node scripts/manage-blocked-server.mjs --remove",
     "launcher:enable": "node scripts/manage-launcher-availability.mjs enable",
     "launcher:disable": "node scripts/manage-launcher-availability.mjs disable",
-    "launcher:status": "node scripts/manage-launcher-availability.mjs status"
+    "launcher:status": "node scripts/manage-launcher-availability.mjs status",
+    "wheel:add": "node scripts/manage-crash-wheel.mjs add",
+    "wheel:remove": "node scripts/manage-crash-wheel.mjs remove",
+    "wheel:list": "node scripts/manage-crash-wheel.mjs list"
   },
   "dependencies": {
     "@fastify/multipart": "^9.4.0",
