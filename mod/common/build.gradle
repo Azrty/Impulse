@@ -69,3 +69,19 @@ task runCurseForgeFingerprintTest(type: JavaExec) {
 }
 
 check.dependsOn runCurseForgeFingerprintTest
+
+task runStandaloneHttpTest(type: JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.impulse.bootstrap.StandaloneHttpTest'
+}
+
+check.dependsOn runStandaloneHttpTest
+
+task runGameCompatTest(type: JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.impulse.gamecompat.ImpulseGameCompatTest'
+}
+
+check.dependsOn runGameCompatTest

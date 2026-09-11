@@ -61,6 +61,15 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+tasks.register('runCrashWheelTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+    mainClass = 'com.impulse.standalone.ui.CrashWheelTest'
+}
+
+tasks.named('check') { dependsOn 'runCrashWheelTest' }
+
 tasks.named('jar', Jar).configure {
     dependsOn 'buildWeb'
     archiveBaseName = 'impulse-standalone-ui'

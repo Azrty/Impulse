@@ -2,6 +2,7 @@ package com.impulse.bootstrap.neoforge121;
 
 import com.impulse.bootstrap.ImpulseStandaloneBootstrap;
 import com.impulse.bootstrap.StandaloneLaunchLog;
+import com.impulse.gamecompat.ImpulseGameCompat;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.ModLoadingIssue;
 import net.neoforged.fml.loading.FMLLoader;
@@ -58,6 +59,12 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
                 FMLLoader.versionInfo().neoForgeVersion()
             );
             if (result.active && result.managedModsDirectory != null) {
+                String profileId = System.getProperty("impulse.standalone.profile_id", "");
+                if (!profileId.isBlank()) {
+                    StartupNotificationManager.locatorConsumer().ifPresent(consumer -> consumer.accept("Impulse: applying compatibility patches"));
+                    ImpulseGameCompat.markStartupAttempt(gameDirectory, profileId);
+                    ImpulseGameCompat.activateStartupPatches(gameDirectory, profileId);
+                }
                 ImpulseStandaloneBootstrap.setProgressReporter(new NeoForgeProgressReporter());
                 StartupNotificationManager.locatorConsumer().ifPresent(consumer -> consumer.accept("Impulse: loading managed mods"));
                 IModFileCandidateLocator.forFolder(result.managedModsDirectory, "").findCandidates(launchContext, pipeline);

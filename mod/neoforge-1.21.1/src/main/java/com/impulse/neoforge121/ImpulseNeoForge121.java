@@ -4,6 +4,8 @@ import com.impulse.common.ImpulseManifestServer;
 import com.impulse.common.ImpulseModUpdater;
 import com.impulse.common.ImpulseRuntimeDefaults;
 import com.impulse.bootstrap.StandaloneLaunchLog;
+import com.impulse.bootstrap.ImpulseStandaloneBootstrap;
+import com.impulse.gamecompat.ImpulseGameCompat;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -31,6 +33,10 @@ public final class ImpulseNeoForge121 {
     public ImpulseNeoForge121(IEventBus modEventBus, ModContainer modContainer) {
         StandaloneLaunchLog.attachFromSystemProperties(gameDirectory());
         StandaloneLaunchLog.info("runtime", "Impulse NeoForge mod initialized", null);
+        if (!ImpulseStandaloneBootstrap.isLauncherLaunch()) {
+            String profileId = System.getProperty("impulse.standalone.profile_id", "");
+            if (!profileId.isBlank()) ImpulseGameCompat.activateLivePatches(gameDirectory(), profileId);
+        }
         modEventBus.addListener(ImpulseBadgeNetwork121::registerPayloads);
         NeoForge.EVENT_BUS.register(this);
         ImpulseModUpdater.checkAsync(gameDirectory(), modContainer.getModInfo().getVersion().toString(), "1.21.1", "neoforge");

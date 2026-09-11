@@ -6,13 +6,14 @@ import {
 } from 'lucide-react';
 import eruda from 'eruda';
 import { heartbeat, invoke } from './bridge';
+import { pollOperation } from './operationPolling';
+import { CrashWheel, type CrashWheelResult } from './CrashWheel';
 import impulseLogo from './generated/impulse-logo.png';
-import type { CustomMod, GlobalMod, InstallPlan, Manifest, Mod, Operation, Profile, Project, SearchProject, State, UpdatePublication, UpdateSection, Version } from './types';
+import type { CustomMod, GameCompatSnapshot, GlobalMod, InstallPlan, Manifest, Mod, Operation, Profile, Project, SearchProject, State, UpdatePublication, UpdateSection, Version } from './types';
 
 type Tab = 'overview' | 'mods';
 type ModView = 'installed' | 'search' | 'project' | 'versions';
 type Warning = { mods: Mod[]; signature: string };
-type CrashWheelResult = { required: boolean; sector: number; crash: boolean; duration_ms: number; passed?: boolean };
 
 let developerToolsInitialized = false;
 function showDeveloperTools() {
@@ -71,6 +72,8 @@ export function App() {
   const [address, setAddress] = useState('');
   const [operation, setOperation] = useState<Operation>();
   const [warning, setWarning] = useState<Warning>();
+  const [gameCompatOffer, setGameCompatOffer] = useState<GameCompatSnapshot>();
+  const [compatOpen, setCompatOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
@@ -82,9 +85,37 @@ export function App() {
   const [bugReportOpen, setBugReportOpen] = useState(false);
   const [developerToolsOpen, setDeveloperToolsOpen] = useState(false);
   const [crashWheel, setCrashWheel] = useState<CrashWheelResult>();
-  const pollRef = useRef<number | undefined>(undefined);
+  const [crashWheelParticipant, setCrashWheelParticipant] = useState(false);
+  const pollRef = useRef<(() => void) | undefined>(undefined);
   const updatesRefreshed = useRef(false);
   const pageRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('crash-wheel-participant', crashWheelParticipant);
+    return () => document.documentElement.classList.remove('crash-wheel-participant');
+  }, [crashWheelParticipant]);
+
+  useEffect(() => {
+    if (!state?.legal_accepted) return;
+    let active = true;
+    let timer: number | undefined;
+    const checkParticipation = async () => {
+      try {
+        const result = await invoke<{ pending: boolean; participating?: boolean }>('crashWheelParticipation');
+        if (!active) return;
+        if (result.pending) timer = window.setTimeout(checkParticipation, 300);
+        else {
+          setCrashWheelParticipant(result.participating === true);
+          timer = window.setTimeout(checkParticipation, 15000);
+        }
+      } catch {
+        setCrashWheelParticipant(false);
+        timer = window.setTimeout(checkParticipation, 15000);
+      }
+    };
+    void checkParticipation();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [state?.legal_accepted]);
 
   const loadState = useCallback(async () => {
     try { setState(await invoke<State>('state')); setError(''); }
@@ -197,29 +228,40 @@ export function App() {
   }, []);
 
   useEffect(() => { if (pageRef.current) pageRef.current.scrollTop = 0; }, [state?.selected_profile?.id, tab]);
+  useEffect(() => () => pollRef.current?.(), []);
 
   const watchOperation = useCallback((id: string) => {
-    if (pollRef.current) window.clearInterval(pollRef.current);
-    const poll = async () => {
-      try {
-        const next = await invoke<Operation>('operation', { id });
+    pollRef.current?.();
+    let stopped = false;
+    let stopPoll = () => {};
+    const finish = () => {
+      if (stopped) return;
+      stopped = true;
+      stopPoll();
+      window.removeEventListener('impulse-operation', terminal);
+    };
+    const receive = async (next: Operation) => {
+        if (stopped || next.id !== id) return stopped;
         setOperation(next);
-        if (next.status === 'running') return;
-        if (pollRef.current) window.clearInterval(pollRef.current);
+        if (next.status === 'running') return false;
         if (next.status === 'cancelled') {
           await loadState();
           setOperation(undefined);
-          return;
+          finish();
+          return true;
         }
         if (next.status === 'error') {
           await loadState();
           setError(next.error || 'The operation failed.');
           setOperation(next);
-          return;
+          finish();
+          return true;
         }
-        const result = next.result as { confirmation_required?: boolean; mods?: Mod[]; signature?: string; report_submitted?: boolean; report_id?: string } | State | undefined;
+        const result = next.result as { confirmation_required?: boolean; mods?: Mod[]; signature?: string; report_submitted?: boolean; report_id?: string; game_compat_offer?: boolean; game_compat?: GameCompatSnapshot } | State | undefined;
         if (result && 'confirmation_required' in result && result.confirmation_required) {
           setWarning({ mods: result.mods || [], signature: result.signature || '' });
+        } else if (result && 'game_compat_offer' in result && result.game_compat_offer && result.game_compat) {
+          setGameCompatOffer(result.game_compat);
         } else if (result && 'report_submitted' in result && result.report_submitted) {
           setNotice(`Report submitted${result.report_id ? ` · ${result.report_id}` : ''}`);
           window.setTimeout(() => setNotice(''), 5000);
@@ -232,16 +274,22 @@ export function App() {
         } else {
           await loadState();
         }
-      } catch (reason) {
-        if (pollRef.current) window.clearInterval(pollRef.current);
-        setError(reason instanceof Error ? reason.message : String(reason));
-      }
+        finish();
+        return true;
     };
-    void poll();
-    pollRef.current = window.setInterval(poll, 300);
+    const terminal = (event: Event) => {
+      const next = (event as CustomEvent<Operation>).detail;
+      if (next?.id === id) void receive(next);
+    };
+    window.addEventListener('impulse-operation', terminal);
+    stopPoll = pollOperation(() => invoke<Operation>('operation', { id }), receive, reason => {
+        setError(reason instanceof Error ? reason.message : String(reason));
+    });
+    pollRef.current = finish;
   }, [loadState]);
 
   const start = useCallback(async (kind: string, payload: Record<string, unknown> = {}) => {
+    pollRef.current?.();
     setError('');
     setOperation({ id: '', kind, status: 'running', message: 'Starting', completed: 0, total: 1 });
     try { watchOperation(await invoke<string>('start', { kind, ...payload })); }
@@ -271,6 +319,7 @@ export function App() {
     if (!profile) return;
     try {
       const wheel = await invoke<CrashWheelResult>('crashWheel');
+      setCrashWheelParticipant(wheel.required);
       if (wheel.required && !wheel.passed) {
         setCrashWheel(wheel);
         return;
@@ -290,11 +339,17 @@ export function App() {
     }
   };
 
+  if (crashWheel && profile) return <CrashWheel round={crashWheel} onSurvived={async () => {
+    setCrashWheel(undefined);
+    await start('play', { profile_id: profile.id, accept_unverified: false });
+  }} onError={message => { setCrashWheel(undefined); setError(message); }} />;
+
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong></div>
         <div className="topbar-actions">
+          <button className="secondary" disabled={!profile || busy} onClick={() => setCompatOpen(true)}><Wrench size={15} /> Game Compat</button>
           <button className="whats-new-button" onClick={() => setNewsOpen(true)}><Sparkles size={15} /> What’s new</button>
           <button className="icon-button" title="Report a bug" aria-label="Report a bug" onClick={() => setBugReportOpen(true)}><CircleHelp size={17} /></button>
           <button className="icon-button topbar-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Cog size={17} /></button>
@@ -353,66 +408,20 @@ export function App() {
       {reportOpen && profile && <ReportServer profile={profile} busy={busy} onClose={() => setReportOpen(false)} onSubmit={(category, details) => { setReportOpen(false); start('report', { profile_id: profile.id, category, details }); }} />}
       {optionalOpen && profile && manifest && <OptionalMods profile={profile} manifest={manifest} onClose={() => setOptionalOpen(false)} onSave={ids => { setOptionalOpen(false); start('optional', { profile_id: profile.id, ids }); }} />}
       {warning && <VerificationWarning warning={warning} onCancel={() => setWarning(undefined)} onContinue={() => { setWarning(undefined); void launch(true); }} />}
+      {compatOpen && profile && <GameCompatManager snapshot={state.game_compat} busy={busy} onClose={() => setCompatOpen(false)} onInstall={id => start('gameCompatInstall', { profile_id: profile.id, ids: [id] })} onToggle={(id, enabled) => start('gameCompatToggle', { profile_id: profile.id, id, enabled })} />}
+      {gameCompatOffer && profile && <GameCompatOffer snapshot={gameCompatOffer} busy={busy} onClose={() => setGameCompatOffer(undefined)} onContinue={ids => {
+        const snapshot = gameCompatOffer;
+        setGameCompatOffer(undefined);
+        if (ids.length) start('gameCompatInstall', { profile_id: profile.id, ids });
+        else start('gameCompatDismiss', { profile_id: profile.id, signature: snapshot.offer_signature });
+      }} />}
+      {profile && state.game_compat?.recovery_available && <Confirm title="Start without Game Compat patches?" text="Minecraft did not reach its menu after a startup patch changed. Disable startup compatibility patches for this profile and try again." confirm="Disable patches" onClose={() => undefined} onConfirm={() => start('gameCompatRecovery', { profile_id: profile.id })} />}
       {modManagerOpen && profile && <ModManager profile={profile} state={state} start={start} operation={operation} onClose={async () => { setModManagerOpen(false); await loadState(); }} />}
       {settingsOpen && <StandaloneSettings state={state} developerToolsOpen={developerToolsOpen} onToggleDeveloperTools={toggleDeveloperTools} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onNews={() => { setSettingsOpen(false); setNewsOpen(true); }} onReportBug={() => { setSettingsOpen(false); setBugReportOpen(true); }} />}
       {newsOpen && <NewsHistory publications={state.publications || []} currentVersion={state.impulse_version} dismissed={state.dismissed_update_ids || []} onClose={() => setNewsOpen(false)} />}
       {bugReportOpen && <BugReport operation={operation?.kind === 'reportBug' ? operation : undefined} onClose={() => setBugReportOpen(false)} onSubmit={(description, includeDiagnostics, screenshots) => start('reportBug', { description, include_diagnostics: includeDiagnostics, screenshots })} />}
-      {crashWheel && profile && <CrashWheel round={crashWheel} onSurvived={async () => {
-        setCrashWheel(undefined);
-        start('play', { profile_id: profile.id, accept_unverified: false });
-      }} onError={message => { setCrashWheel(undefined); setError(message); }} />}
     </div>
   );
-}
-
-function CrashWheel({ round, onSurvived, onError }: { round: CrashWheelResult; onSurvived: () => Promise<void>; onError: (message: string) => void }) {
-  const [remaining, setRemaining] = useState(Math.ceil(round.duration_ms / 1000));
-  const [revealed, setRevealed] = useState(false);
-  const onSurvivedRef = useRef(onSurvived);
-  const onErrorRef = useRef(onError);
-  const labels = ['CRASH', 'PLAY', 'CRASH', 'PLAY', 'CRASH'];
-  const endRotation = 7 * 360 - (round.sector * 72 + 36);
-  useEffect(() => { onSurvivedRef.current = onSurvived; }, [onSurvived]);
-  useEffect(() => { onErrorRef.current = onError; }, [onError]);
-  useEffect(() => {
-    const started = performance.now();
-    let finish: number | undefined;
-    const ticker = window.setInterval(() => setRemaining(Math.max(0, Math.ceil((round.duration_ms - (performance.now() - started)) / 1000))), 100);
-    const reveal = window.setTimeout(() => {
-      window.clearInterval(ticker);
-      setRemaining(0);
-      setRevealed(true);
-      finish = window.setTimeout(async () => {
-        try {
-          const result = await invoke<{ crash: boolean }>('completeCrashWheel');
-          if (!result.crash) await onSurvivedRef.current();
-        } catch (reason) { onErrorRef.current(reason instanceof Error ? reason.message : String(reason)); }
-      }, 1000);
-    }, round.duration_ms);
-    return () => {
-      window.clearInterval(ticker);
-      window.clearTimeout(reveal);
-      if (finish !== undefined) window.clearTimeout(finish);
-    };
-  }, [round.duration_ms]);
-  return <div className={`crash-wheel-screen ${revealed ? (round.crash ? 'lost' : 'won') : 'spinning'}`}>
-    <div className="crash-wheel-glow" />
-    <header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong><span>Crash Wheel</span></div></header>
-    <main>
-      <div className="crash-wheel-copy"><span className="eyebrow">A special challenge</span><h1>You’ve been selected for the Crash Wheel!</h1><p>3 out of 5 outcomes will close Minecraft. Land on Play to continue.</p></div>
-      <div className="wheel-stage">
-        <div className="wheel-pointer" />
-        <div className="wheel" style={{ '--wheel-end': `${endRotation}deg`, '--wheel-duration': `${round.duration_ms}ms` } as React.CSSProperties}>
-          {labels.map((label, index) => <span key={index} className={label === 'PLAY' ? 'play-sector' : ''} style={{ transform: `rotate(${index * 72 + 36}deg) translateY(-42%)` }}>{label}</span>)}
-          <div className="wheel-hub"><img src={impulseLogo} alt="" /></div>
-        </div>
-        {revealed && <div className="wheel-particles">{Array.from({ length: 18 }, (_, index) => <i key={index} style={{ '--particle': index } as React.CSSProperties} />)}</div>}
-      </div>
-      <div className="wheel-result" aria-live="polite">
-        {revealed ? <><strong>{round.crash ? 'Crash! Better luck next launch.' : 'You survived. Let’s play!'}</strong><small>{round.crash ? 'Closing Minecraft…' : 'Preparing your server…'}</small></> : <><strong>The wheel is spinning</strong><small>{remaining > 0 ? `${remaining} second${remaining === 1 ? '' : 's'}…` : 'And the result is…'}</small></>}
-      </div>
-    </main>
-  </div>;
 }
 
 function Boot({ error }: { error: string }) {
@@ -425,6 +434,38 @@ function Legal({ state, onAccepted }: { state: State; onAccepted: (state: State)
   const [busy, setBusy] = useState(false);
   const open = (url: string) => invoke('openExternal', { url });
   return <div className="legal-screen"><div className="legal-card"><div className="legal-icon"><ShieldCheck /></div><span className="eyebrow">Before you continue</span><h1>Welcome to Impulse</h1><p>Impulse needs your agreement to its Privacy Policy and Terms of Service. These documents explain how the software works, the services it contacts, and the rules that apply when you use it.</p><div className="legal-links"><button onClick={() => open(state.privacy_url)}>Privacy Policy <ExternalLink size={15} /></button><button onClick={() => open(state.terms_url)}>Terms of Service <ExternalLink size={15} /></button></div><label className="check"><input type="checkbox" checked={privacy} onChange={e => setPrivacy(e.target.checked)} /><span><Check size={14} /></span>I have read and accept the Privacy Policy.</label><label className="check"><input type="checkbox" checked={terms} onChange={e => setTerms(e.target.checked)} /><span><Check size={14} /></span>I have read and accept the Terms of Service.</label><div className="modal-actions"><button className="secondary" onClick={() => invoke('quit')}>Quit Minecraft</button><button className="primary" disabled={!privacy || !terms || busy} onClick={async () => { setBusy(true); onAccepted(await invoke<State>('acceptLegal')); }}>Accept and continue</button></div></div></div>;
+}
+
+function GameCompatManager({ snapshot, busy, onClose, onInstall, onToggle }: { snapshot?: GameCompatSnapshot; busy: boolean; onClose: () => void; onInstall: (id: string) => void; onToggle: (id: string, enabled: boolean) => void }) {
+  return <div className="modal-backdrop"><div className="modal game-compat-offer" role="dialog" aria-modal="true" aria-labelledby="compat-title">
+    <button className="modal-close" onClick={onClose} aria-label="Close Game Compat"><X /></button>
+    <div className="game-compat-heading"><span><Wrench /></span><div><span className="eyebrow">Your profile</span><h2 id="compat-title">Game Compat</h2><p>Compatibility patches for your next launch.</p></div></div>
+    {snapshot?.error && <div className="inline-warning"><AlertTriangle />{snapshot.error}</div>}
+    <div className="game-compat-list">{snapshot?.patches.map(patch => <div className="game-compat-row compat-manager-row" key={patch.id}>
+      <span className="game-compat-copy"><strong>{patch.name}</strong><small>{patch.description}</small><small>{patch.version} · {patch.status}</small></span>
+      {patch.installed && <label className="compat-toggle"><input type="checkbox" disabled={busy} checked={patch.enabled} onChange={event => onToggle(patch.id, event.target.checked)} />Enabled</label>}
+      {(!patch.installed || patch.update_available) && <button className="secondary" disabled={busy} onClick={() => onInstall(patch.id)}><Download size={16} />{patch.installed ? 'Update' : 'Install'}</button>}
+    </div>)}</div>
+    {!snapshot?.patches.length && <p>{snapshot?.catalog_available ? 'No compatibility patches are available for this profile.' : 'The patch catalog is currently unavailable.'}</p>}
+  </div></div>;
+}
+
+function GameCompatOffer({ snapshot, busy, onClose, onContinue }: { snapshot: GameCompatSnapshot; busy: boolean; onClose: () => void; onContinue: (ids: string[]) => void }) {
+  const available = snapshot.patches.filter(patch => !patch.installed || patch.update_available);
+  const [selected, setSelected] = useState<string[]>(available.map(patch => patch.id));
+  const toggle = (id: string) => setSelected(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id]);
+  return <div className="modal-backdrop game-compat-backdrop"><div className="modal game-compat-offer">
+    <button className="modal-close" disabled={busy} onClick={onClose}><X /></button>
+    <div className="game-compat-heading"><span><Wrench /></span><div><span className="eyebrow">Game Compat</span><h2>Some of your mods can work better with Impulse compatibility patches</h2><p>These optional additions improve compatibility without changing your mod files. You stay in control of what is installed.</p></div></div>
+    <div className="game-compat-list">{available.map(patch => <label key={patch.id} className="game-compat-row">
+      <input type="checkbox" checked={selected.includes(patch.id)} onChange={() => toggle(patch.id)} />
+      <span className="check-box"><Check /></span>
+      <span className="game-compat-copy"><strong>{patch.name}</strong><small>{patch.description}</small></span>
+      <span className="game-compat-meta">{patch.mode === 'startup' ? 'Restart' : 'Live'} · {patch.version}</span>
+    </label>)}</div>
+    {snapshot.error && <div className="inline-warning"><AlertTriangle />{snapshot.error}</div>}
+    <div className="modal-actions"><button className="secondary" disabled={busy} onClick={() => onContinue([])}>Continue without patches</button><button className="primary" disabled={busy || !selected.length} onClick={() => onContinue(selected)}><Download /> Install selected</button></div>
+  </div></div>;
 }
 
 const onboardingPages = [

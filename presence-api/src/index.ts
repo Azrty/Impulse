@@ -15,8 +15,9 @@ const bugReportsDirectory = process.env.BUG_REPORTS_DIRECTORY;
 const bugReportRetentionDays = Number.parseInt(process.env.BUG_REPORT_RETENTION_DAYS ?? '90', 10);
 const bugReportMaxStorageBytes = Number.parseInt(process.env.BUG_REPORT_MAX_STORAGE_BYTES ?? String(20 * 1024 * 1024 * 1024), 10);
 const crashWheelFile = process.env.IMPULSE_CRASH_WHEEL_FILE;
+const gameCompatSigningPrivateKey = process.env.GAME_COMPAT_SIGNING_PRIVATE_KEY;
 
-const app = await createPresenceServer({ secret, curseForgeApiKey, reportsDirectory, bugReportsDirectory, bugReportRetentionDays, bugReportMaxStorageBytes, crashWheelFile });
+const app = await createPresenceServer({ secret, curseForgeApiKey, reportsDirectory, bugReportsDirectory, bugReportRetentionDays, bugReportMaxStorageBytes, crashWheelFile, gameCompatSigningPrivateKey });
 app.log.info({ curseForgeEnabled: Boolean(curseForgeApiKey.trim()) }, 'Optional integrations configured');
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

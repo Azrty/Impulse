@@ -51,6 +51,7 @@ export type PresenceServerOptions = {
   bugReportMaxStorageBytes?: number;
   launcherAvailabilityFile?: string;
   crashWheelFile?: string;
+  gameCompatSigningPrivateKey?: string;
 };
 
 type LauncherAvailability = { schema_version: 1; isLauncherAvailable: boolean };
@@ -113,6 +114,9 @@ type StandaloneUpdatePublication = {
 
 const STANDALONE_UPDATE_ICONS = new Set(['sparkles', 'shield-check', 'package-plus', 'scan-check', 'wrench', 'rocket', 'server', 'download']);
 const EXACT_MOD_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/u;
+const PATCH_ID = /^[a-z0-9][a-z0-9-]{0,79}$/u;
+const SHA512 = /^[0-9a-f]{128}$/u;
+const PATCH_ORIGIN = 'https://impulse.epivalent.com';
 
 function boundedText(value: unknown, name: string, max: number): string {
   if (typeof value !== 'string') throw new Error(`${name} must be a string.`);
@@ -163,6 +167,77 @@ export function sanitizeStandaloneUpdates(value: unknown): { schema_version: 1; 
     };
   }).sort((left, right) => Date.parse(right.published_at) - Date.parse(left.published_at));
   return { schema_version: 1, publications };
+}
+
+export type GameCompatPatch = {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  mode: 'live' | 'startup';
+  download_url: string;
+  file_name: string;
+  sha512: string;
+  size: number;
+  minecraft_versions: string[];
+  loaders: string[];
+  operating_systems: string[];
+  architectures: string[];
+  required_mods: Array<{ id: string; version_range: string }>;
+};
+
+export function sanitizeGameCompatCatalog(value: unknown): { schema_version: 1; patches: GameCompatPatch[] } {
+  const source = value as { schema_version?: unknown; patches?: unknown } | null;
+  if (source?.schema_version !== 1 || !Array.isArray(source.patches)) throw new Error('Invalid Game Compat catalog.');
+  const versions = new Set<string>();
+  const patches = source.patches.map((raw, index) => {
+    const item = raw as Record<string, unknown> | null;
+    const id = boundedText(item?.id, `patches[${index}].id`, 80).toLowerCase();
+    const version = boundedText(item?.version, `${id}.version`, 64);
+    if (!PATCH_ID.test(id) || !EXACT_MOD_VERSION.test(version) || versions.has(`${id}:${version}`)) throw new Error(`Invalid or duplicate Game Compat patch ${id}:${version}.`);
+    versions.add(`${id}:${version}`);
+    const mode = item?.mode === 'startup' ? 'startup' : item?.mode === 'live' ? 'live' : null;
+    if (!mode) throw new Error(`${id}.mode must be live or startup.`);
+    const fileName = boundedText(item?.file_name, `${id}.file_name`, 180);
+    if (!/^[A-Za-z0-9._+-]+\.patch\.jar$/u.test(fileName)) throw new Error(`${id}.file_name must end in .patch.jar.`);
+    const downloadUrl = new URL(boundedText(item?.download_url, `${id}.download_url`, 2048));
+    if (downloadUrl.origin !== PATCH_ORIGIN || !downloadUrl.pathname.startsWith('/patches/')) throw new Error(`${id}.download_url must use the Impulse patch origin.`);
+    const sha512 = boundedText(item?.sha512, `${id}.sha512`, 128).toLowerCase();
+    if (!SHA512.test(sha512)) throw new Error(`${id}.sha512 is invalid.`);
+    const size = Number(item?.size);
+    if (!Number.isSafeInteger(size) || size < 1 || size > 64 * 1024 * 1024) throw new Error(`${id}.size is invalid.`);
+    const stringList = (field: string, allowed?: RegExp) => {
+      const values = item?.[field];
+      if (!Array.isArray(values) || values.length === 0 || values.length > 32) throw new Error(`${id}.${field} must be a non-empty list.`);
+      return [...new Set(values.map(value => boundedText(value, `${id}.${field}`, 80).toLowerCase()))].map(value => {
+        if (allowed && !allowed.test(value)) throw new Error(`${id}.${field} contains an invalid value.`);
+        return value;
+      });
+    };
+    if (!Array.isArray(item?.required_mods) || item.required_mods.length === 0 || item.required_mods.length > 32) throw new Error(`${id}.required_mods must be a non-empty list.`);
+    return {
+      id,
+      name: boundedText(item?.name, `${id}.name`, 120),
+      description: boundedText(item?.description, `${id}.description`, 500),
+      version,
+      mode,
+      download_url: downloadUrl.toString(),
+      file_name: fileName,
+      sha512,
+      size,
+      minecraft_versions: stringList('minecraft_versions'),
+      loaders: stringList('loaders', /^(?:forge|neoforge)$/u),
+      operating_systems: stringList('operating_systems', /^(?:windows|macos|linux|any)$/u),
+      architectures: stringList('architectures', /^(?:x64|arm64|any)$/u),
+      required_mods: item.required_mods.map((dependency, dependencyIndex) => {
+        const entry = dependency as Record<string, unknown> | null;
+        const modId = boundedText(entry?.id, `${id}.required_mods[${dependencyIndex}].id`, 128).toLowerCase();
+        if (!/^[a-z0-9_.-]+$/u.test(modId)) throw new Error(`${id} contains an invalid mod id.`);
+        return { id: modId, version_range: boundedText(entry?.version_range ?? '*', `${id}.${modId}.version_range`, 80) };
+      }),
+    } satisfies GameCompatPatch;
+  });
+  return { schema_version: 1, patches };
 }
 
 export function sanitizeBlockedServerRegistry(value: unknown): { schema_version: 1; servers: BlockedServerEntry[] } {
@@ -431,6 +506,29 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     const body = JSON.stringify(standaloneUpdates);
     return { body, etag: `"${crypto.createHash('sha256').update(body).digest('hex')}"` };
   }
+  const gameCompatPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/game-compat-patches.json');
+  let gameCompatCatalog = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
+  async function currentGameCompatCatalog(): Promise<{ body: string; etag: string; signature: string; publicKey: string; keyId: string }> {
+    try {
+      gameCompatCatalog = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
+    } catch (error) {
+      app.log.warn({ error }, 'Unable to refresh Game Compat catalog; serving last valid copy');
+    }
+    const body = JSON.stringify(gameCompatCatalog);
+    const privateKeyText = options.gameCompatSigningPrivateKey?.trim();
+    if (!privateKeyText) throw new Error('GAME_COMPAT_SIGNING_PRIVATE_KEY is not configured.');
+    const privateKey = crypto.createPrivateKey(privateKeyText.replace(/\\n/g, '\n'));
+    if (privateKey.asymmetricKeyType !== 'ed25519') throw new Error('Game Compat signing key must be Ed25519.');
+    const publicKeyObject = crypto.createPublicKey(privateKey);
+    const publicKey = publicKeyObject.export({ format: 'der', type: 'spki' }) as Buffer;
+    return {
+      body,
+      etag: `"${crypto.createHash('sha256').update(body).digest('hex')}"`,
+      signature: crypto.sign(null, Buffer.from(body), privateKey).toString('base64url'),
+      publicKey: publicKey.toString('base64url'),
+      keyId: crypto.createHash('sha256').update(publicKey).digest('hex'),
+    };
+  }
   const launcherAvailabilityPath = path.resolve(options.launcherAvailabilityFile
     ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/launcher-availability.json'));
   let launcherAvailability: LauncherAvailability = { schema_version: 1, isLauncherAvailable: false };
@@ -490,6 +588,24 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     return reply.type('application/json; charset=utf-8').send(registry.body);
   });
 
+  app.get('/v1/game-compat/patches', async (request, reply) => {
+    let registry;
+    try {
+      registry = await currentGameCompatCatalog();
+    } catch (error) {
+      app.log.error({ error }, 'Game Compat catalog is unavailable');
+      return reply.code(503).send({ error: 'Game Compat catalog is unavailable.' });
+    }
+    reply.header('Cache-Control', 'public, max-age=900, stale-if-error=86400');
+    reply.header('ETag', registry.etag);
+    reply.header('X-Impulse-Signature-Algorithm', 'Ed25519');
+    reply.header('X-Impulse-Public-Key', registry.publicKey);
+    reply.header('X-Impulse-Key-Id', registry.keyId);
+    reply.header('X-Impulse-Signature', registry.signature);
+    if (request.headers['if-none-match'] === registry.etag) return reply.code(304).send();
+    return reply.type('application/json; charset=utf-8').send(registry.body);
+  });
+
   app.get('/v1/launcher/isLauncherAvailable', async (_request, reply) => {
     const availability = await currentLauncherAvailability();
     reply.header('Cache-Control', 'no-store');
@@ -499,6 +615,8 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   app.post('/v1/standalone/crash-wheel', {
     config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
   }, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
+    reply.header('Pragma', 'no-cache');
     const body = request.body as Record<string, unknown> | null;
     const username = cleanReportText(body?.username, 16);
     if (!/^[A-Za-z0-9_]{3,16}$/u.test(username)) return reply.code(400).send({ error: 'Invalid Minecraft username.' });

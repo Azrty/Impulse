@@ -35,6 +35,7 @@ test('returns Crash Wheel eligibility without exposing its registry', async () =
   const eligible = await app.inject({ method: 'POST', url: '/v1/standalone/crash-wheel', payload: { username: 'playerone' } });
   assert.equal(eligible.statusCode, 200);
   assert.deepEqual(eligible.json(), { eligible: true });
+  assert.match(String(eligible.headers['cache-control']), /no-store/u);
   assert.equal(JSON.stringify(eligible.json()).includes('PlayerOne'), false);
   const other = await app.inject({ method: 'POST', url: '/v1/standalone/crash-wheel', payload: { username: 'OtherPlayer' } });
   assert.deepEqual(other.json(), { eligible: false });
@@ -67,6 +68,31 @@ test('keeps CurseForge verification disabled without an Impulse API key', async 
       files: [{ sha512: 'a'.repeat(128), fingerprint: 1234567890 }],
     },
   });
+  assert.equal(response.statusCode, 503);
+  await app.close();
+});
+
+test('serves an Ed25519-signed Game Compat catalog with cache headers', async () => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const app = await createPresenceServer({
+    secret: SECRET,
+    logger: false,
+    gameCompatSigningPrivateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+  });
+  const response = await app.inject({ method: 'GET', url: '/v1/game-compat/patches' });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { schema_version: 1, patches: [] });
+  assert.equal(response.headers['x-impulse-signature-algorithm'], 'Ed25519');
+  assert.equal(response.headers['x-impulse-public-key'], publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'));
+  assert.equal(crypto.verify(null, Buffer.from(response.body), publicKey, Buffer.from(String(response.headers['x-impulse-signature']), 'base64url')), true);
+  const cached = await app.inject({ method: 'GET', url: '/v1/game-compat/patches', headers: { 'if-none-match': String(response.headers.etag) } });
+  assert.equal(cached.statusCode, 304);
+  await app.close();
+});
+
+test('keeps Game Compat unavailable when its signing key is missing', async () => {
+  const app = await createPresenceServer({ secret: SECRET, logger: false });
+  const response = await app.inject({ method: 'GET', url: '/v1/game-compat/patches' });
   assert.equal(response.statusCode, 503);
   await app.close();
 });

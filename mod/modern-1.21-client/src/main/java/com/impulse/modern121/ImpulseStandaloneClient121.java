@@ -1,6 +1,7 @@
 package com.impulse.modern121;
 
 import com.impulse.bootstrap.ImpulseStandaloneBootstrap;
+import com.impulse.gamecompat.ImpulseGameCompat;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
@@ -28,6 +29,7 @@ public final class ImpulseStandaloneClient121 {
     private static boolean setupOpened;
     private static boolean serverListUpdated;
     private static boolean autoConnectConsumed;
+    private static boolean gameCompatReadyMarked;
     private static PresenceController presenceController = PresenceController.NONE;
 
     private ImpulseStandaloneClient121() {
@@ -38,6 +40,11 @@ public final class ImpulseStandaloneClient121 {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft == null || !(minecraft.screen instanceof TitleScreen)) return;
         if (!Boolean.parseBoolean(System.getProperty("impulse.standalone", "false"))) return;
+        if (!gameCompatReadyMarked) {
+            gameCompatReadyMarked = true;
+            String profileId = System.getProperty("impulse.standalone.profile_id", "");
+            if (!profileId.isBlank()) ImpulseGameCompat.markGameReady(minecraft.gameDirectory, profileId);
+        }
         ensureServerList(minecraft);
         if (!autoConnectConsumed && Boolean.parseBoolean(System.getProperty("impulse.auto_connect", "false"))) {
             autoConnectConsumed = true;
@@ -138,6 +145,7 @@ public final class ImpulseStandaloneClient121 {
         private final boolean presenceOnly;
         private String message = "";
         private ConfigTab tab = ConfigTab.PROFILES;
+        private ImpulseGameCompat.Snapshot gameCompatSnapshot;
 
         private ProfilesScreen(Screen parent) {
             this(parent, false);
@@ -152,7 +160,12 @@ public final class ImpulseStandaloneClient121 {
 
         protected void init() {
             if (this.presenceOnly) {
-                initPresence();
+                int tabWidth = Math.min(150, Math.max(100, (this.width - 36) / 2));
+                this.addRenderableWidget(Button.builder(Component.literal("Presence"), button -> switchTab(ConfigTab.PRESENCE))
+                    .bounds(this.width / 2 - tabWidth - 2, 34, tabWidth, 20).build()).active = this.tab != ConfigTab.PRESENCE;
+                this.addRenderableWidget(Button.builder(Component.literal("Game Compat"), button -> switchTab(ConfigTab.GAME_COMPAT))
+                    .bounds(this.width / 2 + 2, 34, tabWidth, 20).build()).active = this.tab != ConfigTab.GAME_COMPAT;
+                if (this.tab == ConfigTab.GAME_COMPAT) initGameCompat(); else initPresence();
                 return;
             }
             int tabWidth = Math.min(120, Math.max(90, (this.width - 28) / 2));
@@ -210,6 +223,32 @@ public final class ImpulseStandaloneClient121 {
                 .bounds(this.width / 2 - 50, this.height - 38, 100, 20).build());
         }
 
+        private void initGameCompat() {
+            String profileId = System.getProperty("impulse.standalone.profile_id", "");
+            ImpulseGameCompat.Snapshot snapshot = ImpulseGameCompat.inspectCached(gameDirectory(), profileId, "1.21.1", "neoforge");
+            this.gameCompatSnapshot = snapshot;
+            int panelWidth = Math.min(420, Math.max(250, this.width - 32));
+            int left = this.width / 2 - panelWidth / 2;
+            int y = 102;
+            for (ImpulseGameCompat.PatchView patch : snapshot.patches) {
+                String label = patch.name + " · " + patch.status;
+                Button toggle = this.addRenderableWidget(Button.builder(Component.literal(fit(label, panelWidth - 8)), button -> {
+                    try {
+                        ImpulseGameCompat.setEnabled(gameDirectory(), profileId, patch.id, !patch.enabled);
+                        this.message = "startup".equals(patch.mode) ? "Restart required for this change." : "Game Compat updated.";
+                    } catch (Exception error) {
+                        this.message = error.getMessage() == null ? "Could not update this patch." : error.getMessage();
+                    }
+                    rebuildWidgets();
+                }).bounds(left, y, panelWidth, 20).build());
+                toggle.active = patch.installed;
+                y += 25;
+                if (y > this.height - 70) break;
+            }
+            this.addRenderableWidget(Button.builder(Component.literal("Done"), button -> this.minecraft.setScreen(this.parent))
+                .bounds(this.width / 2 - 50, this.height - 38, 100, 20).build());
+        }
+
         private void switchTab(ConfigTab next) {
             this.tab = next;
             this.message = "";
@@ -239,7 +278,8 @@ public final class ImpulseStandaloneClient121 {
         public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
             graphics.fill(0, 0, this.width, this.height, 0xFF101010);
             graphics.drawCenteredString(this.font, this.title, this.width / 2, 22, 0xFFFFFF);
-            if (this.presenceOnly || this.tab == ConfigTab.PRESENCE) renderPresence(graphics);
+            if (this.tab == ConfigTab.PRESENCE) renderPresence(graphics);
+            else if (this.tab == ConfigTab.GAME_COMPAT) renderGameCompat(graphics);
             if (this.message.length() > 0) graphics.drawCenteredString(this.font, fit(this.message, this.width - 24), this.width / 2, this.height - 62, 0xDDDDDD);
             renderWidgets(this, graphics, mouseX, mouseY, partialTick);
         }
@@ -298,6 +338,22 @@ public final class ImpulseStandaloneClient121 {
             }
         }
 
+        private void renderGameCompat(GuiGraphics graphics) {
+            String profileId = System.getProperty("impulse.standalone.profile_id", "");
+            ImpulseGameCompat.Snapshot snapshot = this.gameCompatSnapshot;
+            if (snapshot == null) snapshot = new ImpulseGameCompat.Snapshot();
+            int panelWidth = Math.min(452, Math.max(250, this.width - 24));
+            int left = this.width / 2 - panelWidth / 2;
+            graphics.fill(left, 64, left + panelWidth, this.height - 48, 0xFF151515);
+            graphics.renderOutline(left, 64, panelWidth, this.height - 112, 0xFF393939);
+            graphics.drawString(this.font, "Compatibility patches", left + 14, 76, 0xFFFFFFFF, false);
+            String summary = snapshot.patches.isEmpty() ? "No compatible patches are available for the mods in this profile." : "Installed patches can be enabled or disabled below.";
+            for (int i = 0; i < Math.min(2, this.font.split(Component.literal(summary), panelWidth - 28).size()); i++) {
+                graphics.drawString(this.font, this.font.split(Component.literal(summary), panelWidth - 28).get(i), left + 14, 88 + i * 10, 0xFFAAAAAA, false);
+            }
+            if (snapshot.error != null && !snapshot.error.isBlank()) graphics.drawString(this.font, fit(snapshot.error, panelWidth - 28), left + 14, this.height - 64, 0xFFFF9292, false);
+        }
+
         public void onClose() {
             this.minecraft.setScreen(this.parent);
         }
@@ -305,7 +361,8 @@ public final class ImpulseStandaloneClient121 {
 
     private enum ConfigTab {
         PROFILES,
-        PRESENCE
+        PRESENCE,
+        GAME_COMPAT
     }
 
     private static final class SetupScreen extends Screen {

@@ -8,6 +8,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.impulse.bootstrap.ImpulseStandaloneBootstrap;
+import com.impulse.bootstrap.StandaloneLaunchLog;
+import com.impulse.gamecompat.ImpulseGameCompat;
 import dev.webview.Webview;
 import com.sun.jna.Library;
 import com.sun.jna.Native;
@@ -45,6 +47,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 
 /** WebView standalone profile selector launched before NeoForge mod discovery. */
@@ -64,6 +67,9 @@ public final class ImpulseStandaloneUi {
     private static final int MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
     private static final long MAX_CRASH_AGE_MS = 48L * 60L * 60L * 1000L;
     private static final long CRASH_WHEEL_DURATION_MS = 10000L;
+    private static final long CRASH_WHEEL_START_DELAY_MS = 2000L;
+    private static final long CRASH_WHEEL_MERCY_DURATION_MS = 3000L;
+    private static final int CRASH_WHEEL_MAX_LOSSES = 3;
     private static final Set<String> UPDATE_ICONS = Set.of("sparkles", "shield-check", "package-plus", "scan-check", "wrench", "rocket", "server", "download");
 
     private final ImpulseStandaloneBootstrap.UiRequest request;
@@ -91,10 +97,14 @@ public final class ImpulseStandaloneUi {
     private volatile ImpulseStandaloneBootstrap.RestrictedServerException currentRestriction;
     private volatile UpdateRegistry updateRegistry;
     private final SecureRandom crashWheelRandom = new SecureRandom();
+    private volatile FutureTask<Boolean> crashWheelParticipation;
     private volatile boolean crashWheelChecked;
+    private volatile boolean crashWheelPlayChecked;
     private volatile boolean crashWheelRequired;
     private volatile boolean crashWheelPassed;
     private volatile boolean crashWheelCrash;
+    private volatile boolean crashWheelMercy;
+    private volatile boolean crashWheelResolved;
     private volatile int crashWheelSector = -1;
     private volatile long crashWheelStartedAt;
 
@@ -102,6 +112,12 @@ public final class ImpulseStandaloneUi {
         this.request = request;
         this.gameDirectory = new File(request.game_directory);
         this.sessionDirectory = new File(request.session_directory);
+        if (request.launch_log_path != null && request.launch_directory != null) {
+            System.setProperty("impulse.standalone.launch.log", request.launch_log_path);
+            System.setProperty("impulse.standalone.launch.directory", request.launch_directory);
+            System.setProperty("impulse.standalone.launch.startedAt", Long.toString(request.launch_started_at));
+            StandaloneLaunchLog.attachFromSystemProperties(gameDirectory);
+        }
         this.legalAccepted = loadLegalAcceptance();
         this.updateRegistry = loadCachedUpdates();
         ImpulseStandaloneBootstrap.Store store = ImpulseStandaloneBootstrap.loadStore(gameDirectory);
@@ -263,6 +279,9 @@ public final class ImpulseStandaloneUi {
         if ("state".equals(action)) return state();
         if ("bugReportInfo".equals(action)) return bugReportInfo();
         if ("pickScreenshots".equals(action)) return pickScreenshots();
+        if ("crashWheelParticipation".equals(action)) {
+            return crashWheelParticipationStatus();
+        }
         if ("crashWheel".equals(action)) return crashWheel();
         if ("completeCrashWheel".equals(action)) return completeCrashWheel();
         if ("selectProfile".equals(action)) {
@@ -369,6 +388,8 @@ public final class ImpulseStandaloneUi {
         if (currentRestriction != null) state.put("restriction", restrictionMap(currentRestriction));
         if (selected != null) {
             state.put("custom_mods", ImpulseStandaloneBootstrap.loadCustomModState(gameDirectory, selected.id).mods);
+            state.put("game_compat", ImpulseGameCompat.inspect(
+                gameDirectory, selected.id, request.minecraft_version, request.loader));
             try {
                 ImpulseStandaloneBootstrap.RestrictedServerException restriction = ImpulseStandaloneBootstrap.serverRestriction(selected.address);
                 if (restriction != null) {
@@ -382,26 +403,69 @@ public final class ImpulseStandaloneUi {
         return state;
     }
 
-    private synchronized Map<String, Object> crashWheel() {
+    private synchronized boolean crashWheelParticipant() {
         if (!crashWheelChecked) {
             crashWheelChecked = true;
+            // Local state must never activate the prank by itself. A fresh, explicit
+            // positive response from the API is required for this helper session.
             boolean eligible = crashWheelEligible();
+            crashWheelMercy = eligible && crashWheelLosses() >= CRASH_WHEEL_MAX_LOSSES;
             crashWheelRequired = eligible;
             crashWheelPassed = !eligible;
-            if (eligible) {
-                crashWheelSector = crashWheelRandom.nextInt(5);
-                crashWheelCrash = crashWheelSector == 0 || crashWheelSector == 2 || crashWheelSector == 4;
-                crashWheelStartedAt = System.currentTimeMillis();
-                System.out.println("[Impulse UI] Crash Wheel started for an eligible participant; sector=" + crashWheelSector + ".");
-            }
+        }
+        return crashWheelRequired;
+    }
+
+    private synchronized Map<String, Object> crashWheelParticipationStatus() throws Exception {
+        if (crashWheelParticipation == null) {
+            crashWheelParticipation = new FutureTask<Boolean>(this::crashWheelEligible);
+            images.execute(crashWheelParticipation);
+            return Collections.singletonMap("pending", true);
+        }
+        if (!crashWheelParticipation.isDone()) return Collections.singletonMap("pending", true);
+        boolean participating = crashWheelParticipation.get();
+        crashWheelParticipation = null;
+        return Map.of("pending", false, "participating", participating);
+    }
+
+    private synchronized Map<String, Object> crashWheel() {
+        // Revalidate on Play instead of trusting the earlier cursor check. This is
+        // deliberately uncached so removals from the API take effect immediately.
+        if (!crashWheelPlayChecked) {
+            boolean eligible = crashWheelEligible();
+            crashWheelPlayChecked = true;
+            crashWheelChecked = true;
+            crashWheelRequired = eligible;
+            crashWheelPassed = !eligible;
+            crashWheelMercy = eligible && crashWheelLosses() >= CRASH_WHEEL_MAX_LOSSES;
+        }
+        if (crashWheelRequired && crashWheelSector < 0) {
+            crashWheelSector = crashWheelRandom.nextInt(5);
+            crashWheelCrash = !crashWheelMercy && (crashWheelSector == 0 || crashWheelSector == 2 || crashWheelSector == 4);
+            crashWheelStartedAt = System.currentTimeMillis();
+            System.out.println("[Impulse UI] Crash Wheel started for an eligible participant; sector=" + crashWheelSector + ".");
         }
         Map<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("required", crashWheelRequired);
         result.put("sector", crashWheelSector);
         result.put("crash", crashWheelCrash);
-        result.put("duration_ms", CRASH_WHEEL_DURATION_MS);
+        result.put("duration_ms", crashWheelDuration());
+        result.put("start_delay_ms", CRASH_WHEEL_START_DELAY_MS);
+        result.put("mercy", crashWheelMercy);
         result.put("passed", crashWheelPassed);
         return result;
+    }
+
+    private long crashWheelDuration() {
+        return crashWheelMercy ? CRASH_WHEEL_MERCY_DURATION_MS : CRASH_WHEEL_DURATION_MS;
+    }
+
+    private int crashWheelLosses() {
+        try {
+            JsonObject settings = loadStandaloneSettings();
+            return settings.has("crash_wheel_losses")
+                ? Math.max(0, Math.min(CRASH_WHEEL_MAX_LOSSES, settings.get("crash_wheel_losses").getAsInt())) : 0;
+        } catch (RuntimeException ignored) { return 0; }
     }
 
     private boolean crashWheelEligible() {
@@ -410,24 +474,34 @@ public final class ImpulseStandaloneUi {
         HttpURLConnection connection = null;
         try {
             String apiBase = System.getProperty("impulse.presence.api", "https://api.impulsemc.com").replaceAll("/+$", "");
-            URL endpoint = new URL(apiBase + "/v1/standalone/crash-wheel");
+            // A unique request URL prevents an intermediary from replaying an older
+            // positive eligibility decision after a participant is removed.
+            URL endpoint = new URL(apiBase + "/v1/standalone/crash-wheel?request=" + UUID.randomUUID());
             connection = (HttpURLConnection) endpoint.openConnection();
             connection.setRequestMethod("POST");
             connection.setConnectTimeout(5000);
             connection.setReadTimeout(5000);
+            connection.setUseCaches(false);
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Cache-Control", "no-cache, no-store");
             connection.setRequestProperty("User-Agent", "Impulse-Standalone/" + clean(request.impulse_version, "unknown"));
             JsonObject body = new JsonObject();
             body.addProperty("username", username);
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             connection.setFixedLengthStreamingMode(bytes.length);
             try (OutputStream output = connection.getOutputStream()) { output.write(bytes); }
-            if (connection.getResponseCode() != 200) return false;
+            int status = connection.getResponseCode();
+            if (status != 200) {
+                System.err.println("[Impulse UI] Crash Wheel eligibility rejected with HTTP " + status + ".");
+                return false;
+            }
             try (InputStream input = connection.getInputStream()) {
                 JsonObject response = new JsonParser().parse(new String(readLimited(input, 16 * 1024), StandardCharsets.UTF_8)).getAsJsonObject();
-                return response.has("eligible") && response.get("eligible").getAsBoolean();
+                return response.has("eligible") && response.get("eligible").isJsonPrimitive()
+                    && response.getAsJsonPrimitive("eligible").isBoolean()
+                    && response.get("eligible").getAsBoolean();
             }
         } catch (Exception error) {
             System.err.println("[Impulse UI] Crash Wheel eligibility check unavailable: " + error.getMessage());
@@ -439,11 +513,18 @@ public final class ImpulseStandaloneUi {
 
     private synchronized Map<String, Object> completeCrashWheel() throws IOException {
         if (!crashWheelRequired || crashWheelSector < 0) throw new IOException("No Crash Wheel round is active.");
-        long remaining = CRASH_WHEEL_DURATION_MS - (System.currentTimeMillis() - crashWheelStartedAt);
+        long remaining = CRASH_WHEEL_START_DELAY_MS + crashWheelDuration() - (System.currentTimeMillis() - crashWheelStartedAt);
         if (remaining > 0L) throw new IOException("The Crash Wheel is still spinning.");
         Map<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("crash", crashWheelCrash);
+        result.put("closed", crashWheelCrash);
+        if (crashWheelResolved) return result;
         if (crashWheelCrash) {
+            // Persist before exiting, and resolve once so duplicate bridge calls cannot count twice.
+            JsonObject settings = loadStandaloneSettings();
+            settings.addProperty("crash_wheel_losses", Math.min(CRASH_WHEEL_MAX_LOSSES, crashWheelLosses() + 1));
+            writeJsonAtomic(standaloneSettingsFile(), settings);
+            crashWheelResolved = true;
             writeResult("quit", null, null);
             completed = true;
             result.put("closed", true);
@@ -454,6 +535,7 @@ public final class ImpulseStandaloneUi {
             closer.setDaemon(true);
             closer.start();
         } else {
+            crashWheelResolved = true;
             crashWheelPassed = true;
             result.put("closed", false);
         }
@@ -504,6 +586,14 @@ public final class ImpulseStandaloneUi {
                 case "repairMod" -> repairMod(operation, command);
                 case "checkUpdates" -> checkUpdates(operation, command);
                 case "globalMods" -> globalMods(operation, command);
+                case "gameCompatInstall" -> gameCompatInstall(operation, command);
+                case "gameCompatToggle" -> {
+                    ImpulseGameCompat.setEnabledForNextLaunch(gameDirectory, required(command, "profile_id"),
+                        required(command, "id"), command.get("enabled").getAsBoolean());
+                    operation.result = state();
+                }
+                case "gameCompatDismiss" -> gameCompatDismiss(operation, command);
+                case "gameCompatRecovery" -> gameCompatRecovery(operation, command);
                 default -> throw new IOException("Unsupported operation: " + operation.kind);
             }
             operation.done(operation.result);
@@ -521,7 +611,23 @@ public final class ImpulseStandaloneUi {
             error.printStackTrace(System.err);
         } finally {
             ImpulseStandaloneBootstrap.setProgressReporter(null);
+            StandaloneLaunchLog.info("ui:" + operation.kind, "Operation finished",
+                StandaloneLaunchLog.fields("status", operation.status, "message", operation.message, "error", operation.error));
         }
+    }
+
+    private void publishOperation(Operation operation) {
+        Webview current = webview;
+        if (current == null || !webviewRunning) return;
+        String payload = GSON.toJson(operation);
+        current.dispatch(() -> {
+            if (webview != current || !webviewRunning) return;
+            try {
+                current.eval("window.dispatchEvent(new CustomEvent('impulse-operation',{detail:" + payload + "}));");
+            } catch (Throwable error) {
+                System.err.println("[Impulse UI] Could not publish operation result: " + clean(error.getMessage(), error.getClass().getSimpleName()));
+            }
+        });
     }
 
     private void addServer(Operation operation, String address) throws Exception {
@@ -539,7 +645,7 @@ public final class ImpulseStandaloneUi {
         currentRestriction = null;
         ImpulseStandaloneBootstrap.Profile profile = requireProfile(profileId);
         operation.update("Refreshing " + clean(profile.name, profile.address), 0, 1);
-        ImpulseStandaloneBootstrap.Discovery discovery = ImpulseStandaloneBootstrap.discover(profile.address);
+        ImpulseStandaloneBootstrap.Discovery discovery = ImpulseStandaloneBootstrap.discoverForLaunch(profile);
         ImpulseStandaloneBootstrap.validateRuntime(discovery.manifest, request.minecraft_version, request.loader, request.loader_version);
         ImpulseStandaloneBootstrap.saveProfile(gameDirectory, discovery, profile.selected_optional_ids);
         selectedProfileId = profileId;
@@ -852,7 +958,7 @@ public final class ImpulseStandaloneUi {
     }
 
     private void play(Operation operation, String profileId, boolean acceptUnverified) throws Exception {
-        crashWheel();
+        if (!crashWheelPlayChecked) crashWheel();
         if (crashWheelRequired && !crashWheelPassed) throw new IOException("Complete the Crash Wheel before launching.");
         ensureLaunchActive(operation);
         currentRestriction = null;
@@ -860,17 +966,29 @@ public final class ImpulseStandaloneUi {
         ImpulseStandaloneBootstrap.RestrictedServerException restriction = ImpulseStandaloneBootstrap.serverRestriction(profile.address);
         if (restriction != null) throw restriction;
         operation.update("Checking server", 0, 1);
-        ImpulseStandaloneBootstrap.Discovery discovery = ImpulseStandaloneBootstrap.discover(profile.address);
+        ImpulseStandaloneBootstrap.Discovery discovery = ImpulseStandaloneBootstrap.discoverForLaunch(profile);
         ensureLaunchActive(operation);
         ImpulseStandaloneBootstrap.validateRuntime(discovery.manifest, request.minecraft_version, request.loader, request.loader_version);
         ImpulseStandaloneBootstrap.Profile prepared = ImpulseStandaloneBootstrap.prepareProfileForLaunch(
             gameDirectory, discovery, profile.selected_optional_ids);
         ensureLaunchActive(operation);
+        ImpulseGameCompat.updateInstalled(gameDirectory, prepared.id, request.minecraft_version, request.loader, operation::update);
+        ImpulseGameCompat.Snapshot gameCompat = ImpulseGameCompat.inspect(
+            gameDirectory, prepared.id, request.minecraft_version, request.loader);
+        if (gameCompat.offer_required) {
+            operation.update("Waiting for Game Compat selection", 0, 1);
+            Map<String, Object> offer = new LinkedHashMap<String, Object>();
+            offer.put("game_compat_offer", true);
+            offer.put("game_compat", gameCompat);
+            operation.result = offer;
+            return;
+        }
         List<ImpulseStandaloneBootstrap.ManifestMod> problems = ImpulseStandaloneBootstrap.problematicMods(
             discovery.manifest, prepared.selected_optional_ids);
         String signature = ImpulseStandaloneBootstrap.problematicSignature(problems);
         if (!problems.isEmpty() && !signature.equals(prepared.accepted_unverified_mod_signature)) {
             if (!acceptUnverified) {
+                operation.update("Waiting for mod verification confirmation", 0, 1);
                 Map<String, Object> warning = new LinkedHashMap<String, Object>();
                 warning.put("confirmation_required", true);
                 warning.put("mods", problems);
@@ -880,6 +998,8 @@ public final class ImpulseStandaloneUi {
             }
             ImpulseStandaloneBootstrap.acceptUnverifiedMods(gameDirectory, prepared.id, signature);
         }
+        ensureLaunchActive(operation);
+        operation.update("Starting Minecraft", 1, 1);
         ImpulseStandaloneBootstrap.setActiveProfile(gameDirectory, prepared.id);
         writeResult("selected", prepared.id, null);
         completed = true;
@@ -890,6 +1010,23 @@ public final class ImpulseStandaloneUi {
         }, "impulse-web-close");
         closer.setDaemon(true);
         closer.start();
+    }
+
+    private void gameCompatInstall(Operation operation, JsonObject command) throws Exception {
+        String profileId = required(command, "profile_id");
+        operation.result = ImpulseGameCompat.install(gameDirectory, profileId, request.minecraft_version, request.loader,
+            strings(command, "ids"), operation::update);
+    }
+
+    private void gameCompatDismiss(Operation operation, JsonObject command) throws Exception {
+        String profileId = required(command, "profile_id");
+        ImpulseGameCompat.dismissOffer(gameDirectory, profileId, required(command, "signature"));
+        operation.result = state();
+    }
+
+    private void gameCompatRecovery(Operation operation, JsonObject command) throws Exception {
+        ImpulseGameCompat.disableForRecovery(gameDirectory, required(command, "profile_id"));
+        operation.result = state();
     }
 
     private static void ensureLaunchActive(Operation operation) throws InterruptedException {
@@ -1520,7 +1657,7 @@ public final class ImpulseStandaloneUi {
         }
     }
 
-    private static final class Operation {
+    private final class Operation {
         final String id;
         final String kind;
         volatile String status = "running";
@@ -1552,10 +1689,11 @@ public final class ImpulseStandaloneUi {
             Future<?> active = future;
             if (active != null) active.cancel(true);
             status = "cancelled";
+            publishOperation(this);
         }
-        void cancelled() { cancelRequested = true; status = "cancelled"; message = "Cancelled"; }
-        void done(Object result) { if (!cancelRequested) { this.result = result; this.status = "done"; } }
-        void fail(Throwable error) { if (!cancelRequested) { this.error = clean(error.getMessage(), error.getClass().getSimpleName()); this.status = "error"; } }
+        void cancelled() { cancelRequested = true; status = "cancelled"; message = "Cancelled"; publishOperation(this); }
+        void done(Object result) { if (!cancelRequested) { this.result = result; this.status = "done"; publishOperation(this); } }
+        void fail(Throwable error) { if (!cancelRequested) { this.error = clean(error.getMessage(), error.getClass().getSimpleName()); this.status = "error"; publishOperation(this); } }
     }
 
     private static final class ImageJob {

@@ -82,7 +82,7 @@ public final class ImpulseStandaloneBootstrap {
     private static final Pattern MOTD_PORT = Pattern.compile("\\[impulse:(\\d{1,5})]", Pattern.CASE_INSENSITIVE);
     private static final Pattern TEXT_PORT = Pattern.compile("(?:impulse[-_\\s]*(?:manifest[-_\\s]*)?|manifest[-_\\s]*)port\\s*[:=]\\s*(\\d{1,5})", Pattern.CASE_INSENSITIVE);
     private static final Pattern TOML_MOD_ID = Pattern.compile("(?m)^\\s*modId\\s*=\\s*[\"']([^\"']+)[\"']");
-    private static final String UI_BUNDLE_VERSION = "webview-5";
+    private static final String UI_BUNDLE_VERSION = "webview-6";
     private static final long UI_READY_TIMEOUT_MS = 65000L;
     private static volatile ProgressReporter progressReporter = ProgressReporter.NONE;
     private static volatile boolean skippedGlobalRestoreHookRegistered;
@@ -433,7 +433,7 @@ public final class ImpulseStandaloneBootstrap {
         progressReporter.begin("Impulse: contacting " + profile.address, 2);
         try {
             progressReporter.progress("Impulse: contacting " + profile.address, 0, 2);
-            discovery = discover(profile.address, profile.manifest_public_key);
+            discovery = discoverForLaunch(profile);
             progressReporter.progress("Impulse: checking manifest", 1, 2);
             validateRuntime(discovery.manifest, minecraftVersion, loader, loaderVersion);
             progressReporter.progress("Impulse: manifest verified", 2, 2);
@@ -455,6 +455,11 @@ public final class ImpulseStandaloneBootstrap {
 
     public static Discovery discover(String input) throws IOException {
         return discover(input, null, true);
+    }
+
+    public static Discovery discoverForLaunch(Profile profile) throws IOException {
+        // Catalog checks belong after file synchronization, not twice per Play.
+        return discover(profile.address, profile.manifest_public_key, false);
     }
 
     public static Discovery discoverForSetup(String input) throws IOException {
@@ -670,7 +675,10 @@ public final class ImpulseStandaloneBootstrap {
         verifyManifestModOrigins(discovery.manifest);
         checkCancelled();
         finalizeManifestModOrigins(gameDirectory, discovery.manifest, effective, managedMods);
+        checkCancelled();
+        progressReporter.message("Saving verified profile");
         writeTextAtomic(new File(profileRoot, "manifest.json"), GSON.toJson(discovery.manifest));
+        StandaloneLaunchLog.info("verification", "Server mod verification completed", StandaloneLaunchLog.fields("mods", effective.size()));
         return profile;
     }
 
@@ -1218,6 +1226,7 @@ public final class ImpulseStandaloneBootstrap {
                         long speed = Math.max(0L, (downloaded - existing) * 1000L / elapsed);
                         StandaloneLaunchLog.info("download", "Download progress", StandaloneLaunchLog.fields("file", target.getName(),
                             "bytes", downloaded, "total_bytes", expectedSize, "percent", percent, "bytes_per_second", speed));
+                        progressReporter.download(target.getName(), downloaded, expectedSize, speed);
                         lastPercent = percent;
                         lastLoggedAt = lastProgress;
                     }
@@ -1503,7 +1512,8 @@ public final class ImpulseStandaloneBootstrap {
         for (ManifestMod mod : manifest.optional_mods) normalizeMod(mod, false);
     }
 
-    private static void verifyManifestModOrigins(Manifest manifest) {
+    private static void verifyManifestModOrigins(Manifest manifest) throws IOException {
+        checkCancelled();
         List<ManifestMod> all = new ArrayList<ManifestMod>();
         all.addAll(safeMods(manifest));
         all.addAll(safeOptionalMods(manifest));
@@ -1512,34 +1522,33 @@ public final class ImpulseStandaloneBootstrap {
         File cacheFile = new File(new File(new File(System.getProperty("user.dir", "."), "impulse"), "standalone"), "mod-verification-cache.json");
         VerificationCache cache = new VerificationCache();
         try {
-            if (cacheFile.isFile()) cache = GSON.fromJson(readAll(new FileInputStream(cacheFile), 4 * 1024 * 1024), VerificationCache.class);
+            if (cacheFile.isFile()) {
+                try (InputStream input = new FileInputStream(cacheFile)) {
+                    cache = GSON.fromJson(readAll(input, 4 * 1024 * 1024), VerificationCache.class);
+                }
+            }
             if (cache == null) cache = new VerificationCache();
             if (cache.entries == null) cache.entries = new HashMap<String, VerificationCacheEntry>();
         } catch (Exception ignored) { cache = new VerificationCache(); }
         try {
+            verificationStage("Checking Impulse mod registry");
             HttpPayload registry = readPayload(new URL("https://api.impulsemc.com/v1/mod-verification/recognized-mods"), 2 * 1024 * 1024, 5000, 10000);
             JsonObject root = new JsonParser().parse(new String(registry.body, StandardCharsets.UTF_8)).getAsJsonObject();
             recognized = root.has("mods") && root.get("mods").isJsonObject() ? root.getAsJsonObject("mods") : new JsonObject();
-        } catch (Exception error) { System.err.println("[Impulse] Recognized mod registry unavailable: " + error.getMessage()); }
+        } catch (Exception error) { checkCancelled(); verificationUnavailable("Impulse registry", error); }
         try {
+            checkCancelled();
+            verificationStage("Checking Modrinth releases");
             JsonObject request = new JsonObject();
             JsonArray hashes = new JsonArray();
             for (ManifestMod mod : all) if (clean(mod.sha512, "").matches("[0-9a-f]{128}")) hashes.add(new JsonPrimitive(mod.sha512));
             request.add("hashes", hashes);
             request.addProperty("algorithm", "sha512");
-            HttpURLConnection connection = (HttpURLConnection) new URL("https://api.modrinth.com/v2/version_files").openConnection();
-            connection.setRequestMethod("POST");
-            connection.setDoOutput(true);
-            connection.setConnectTimeout(5000);
-            connection.setReadTimeout(10000);
-            connection.setRequestProperty("Content-Type", "application/json");
-            connection.setRequestProperty("User-Agent", "ImpulseStandalone/1.2 (https://impulsemc.com)");
-            OutputStream output = connection.getOutputStream();
-            try { output.write(request.toString().getBytes(StandardCharsets.UTF_8)); } finally { output.close(); }
-            if (connection.getResponseCode() != 200) throw new IOException("HTTP " + connection.getResponseCode());
-            versions = new JsonParser().parse(readAll(connection.getInputStream(), 8 * 1024 * 1024)).getAsJsonObject();
-            connection.disconnect();
-        } catch (Exception error) { System.err.println("[Impulse] Modrinth verification unavailable: " + error.getMessage()); }
+            StandaloneHttp.Response response = StandaloneHttp.request(new URL("https://api.modrinth.com/v2/version_files"),
+                request.toString().getBytes(StandardCharsets.UTF_8), 8 * 1024 * 1024, 5000, 10000, 15000);
+            versions = new JsonParser().parse(new String(response.body, StandardCharsets.UTF_8)).getAsJsonObject();
+        } catch (Exception error) { checkCancelled(); verificationUnavailable("Modrinth", error); }
+        checkCancelled();
         for (ManifestMod mod : all) {
             mod.verification = new Verification();
             String hash = clean(mod.sha512, "");
@@ -1568,10 +1577,24 @@ public final class ImpulseStandaloneBootstrap {
         try { writeTextAtomic(cacheFile, GSON.toJson(cache)); } catch (Exception error) { System.err.println("[Impulse] Could not save mod verification cache: " + error.getMessage()); }
     }
 
-    private static void finalizeManifestModOrigins(File gameDirectory, Manifest manifest, List<ManifestMod> effective, File managedDirectory) {
+    private static void verificationStage(String message) throws InterruptedIOException {
+        checkCancelled();
+        progressReporter.begin(message, 1);
+        StandaloneLaunchLog.info("verification", message, null);
+    }
+
+    private static void verificationUnavailable(String service, Exception error) {
+        System.err.println("[Impulse] " + service + " verification unavailable: " + error.getMessage());
+        StandaloneLaunchLog.warn("verification", "Verification service unavailable",
+            StandaloneLaunchLog.fields("service", service, "error", error.getMessage()));
+    }
+
+    private static void finalizeManifestModOrigins(File gameDirectory, Manifest manifest, List<ManifestMod> effective, File managedDirectory) throws IOException {
+        verificationStage("Preparing CurseForge file checks");
         List<CurseForgeCandidate> candidates = new ArrayList<CurseForgeCandidate>();
         FingerprintCache fingerprints = loadFingerprintCache(gameDirectory);
         for (ManifestMod mod : effective) {
+            checkCancelled();
             if (mod.verification == null) mod.verification = new Verification();
             if ("Recognized by Impulse".equals(mod.verification.status) || "Matched on Modrinth".equals(mod.verification.status)) continue;
             File file = new File(managedDirectory, safeFileName(mod.file_name));
@@ -1581,10 +1604,13 @@ public final class ImpulseStandaloneBootstrap {
             }
             try {
                 Long cached = fingerprints.entries.get(mod.sha512);
+                progressReporter.message("Checking file identity: " + displayName(mod));
+                StandaloneLaunchLog.info("verification", "Checking CurseForge fingerprint", StandaloneLaunchLog.fields("mod", displayName(mod), "cached", cached != null));
                 long fingerprint = cached == null ? curseForgeFingerprint(file) : cached.longValue();
                 fingerprints.entries.put(mod.sha512, Long.valueOf(fingerprint));
                 candidates.add(new CurseForgeCandidate(mod, fingerprint));
             } catch (Exception error) {
+                checkCancelled();
                 mod.verification.status = "Verification unavailable";
                 System.err.println("[Impulse] Could not fingerprint " + mod.file_name + ": " + error.getMessage());
             }
@@ -1596,6 +1622,7 @@ public final class ImpulseStandaloneBootstrap {
         boolean available = true;
         try {
             for (int offset = 0; offset < candidates.size(); offset += 100) {
+                verificationStage("Checking CurseForge releases (" + (offset / 100 + 1) + "/" + ((candidates.size() + 99) / 100) + ")");
                 List<CurseForgeCandidate> chunk = candidates.subList(offset, Math.min(candidates.size(), offset + 100));
                 JsonObject request = new JsonObject();
                 request.addProperty("minecraft_version", clean(manifest.minecraft.version, ""));
@@ -1608,25 +1635,19 @@ public final class ImpulseStandaloneBootstrap {
                     files.add(file);
                 }
                 request.add("files", files);
-                HttpURLConnection connection = (HttpURLConnection) new URL(CURSEFORGE_VERIFICATION_URL).openConnection();
-                connection.setRequestMethod("POST");
-                connection.setDoOutput(true);
-                connection.setConnectTimeout(5000);
-                connection.setReadTimeout(15000);
-                connection.setRequestProperty("Accept", "application/json");
-                connection.setRequestProperty("Content-Type", "application/json");
-                connection.setRequestProperty("User-Agent", "ImpulseStandalone/1.2 (https://impulsemc.com)");
-                OutputStream output = connection.getOutputStream();
-                try { output.write(request.toString().getBytes(StandardCharsets.UTF_8)); } finally { output.close(); }
-                if (connection.getResponseCode() != 200) throw new IOException("HTTP " + connection.getResponseCode());
-                JsonObject response = new JsonParser().parse(readAll(connection.getInputStream(), 4 * 1024 * 1024)).getAsJsonObject();
+                StandaloneHttp.Response payload = StandaloneHttp.request(new URL(CURSEFORGE_VERIFICATION_URL),
+                    request.toString().getBytes(StandardCharsets.UTF_8), 4 * 1024 * 1024, 5000, 15000, 20000);
+                JsonObject response = new JsonParser().parse(new String(payload.body, StandardCharsets.UTF_8)).getAsJsonObject();
+                if (response.has("enabled") && !response.get("enabled").getAsBoolean()) {
+                    throw new IOException("CurseForge verification is disabled on the Impulse API.");
+                }
                 JsonObject matches = response.has("matches") && response.get("matches").isJsonObject() ? response.getAsJsonObject("matches") : new JsonObject();
                 for (Map.Entry<String, JsonElement> entry : matches.entrySet()) if (entry.getValue().isJsonObject()) results.put(entry.getKey(), entry.getValue().getAsJsonObject());
-                connection.disconnect();
             }
         } catch (Exception error) {
+            checkCancelled();
             available = false;
-            System.err.println("[Impulse] CurseForge verification unavailable: " + error.getMessage());
+            verificationUnavailable("CurseForge", error);
         }
 
         for (CurseForgeCandidate candidate : candidates) {
@@ -1648,7 +1669,10 @@ public final class ImpulseStandaloneBootstrap {
         try {
             byte[] buffer = new byte[64 * 1024];
             int read;
-            while ((read = countInput.read(buffer)) >= 0) for (int i = 0; i < read; i++) if (!curseForgeWhitespace(buffer[i] & 0xff)) normalizedLength++;
+            while ((read = countInput.read(buffer)) >= 0) {
+                checkCancelled();
+                for (int i = 0; i < read; i++) if (!curseForgeWhitespace(buffer[i] & 0xff)) normalizedLength++;
+            }
         } finally { countInput.close(); }
         int multiplier = 0x5bd1e995;
         int hash = 1 ^ (int) normalizedLength;
@@ -1659,6 +1683,7 @@ public final class ImpulseStandaloneBootstrap {
             byte[] buffer = new byte[64 * 1024];
             int read;
             while ((read = input.read(buffer)) >= 0) {
+                checkCancelled();
                 for (int i = 0; i < read; i++) {
                     int value = buffer[i] & 0xff;
                     if (curseForgeWhitespace(value)) continue;
@@ -1691,7 +1716,10 @@ public final class ImpulseStandaloneBootstrap {
         File file = new File(standaloneRoot(gameDirectory), "curseforge-fingerprints.json");
         if (!file.isFile()) return new FingerprintCache();
         try {
-            FingerprintCache cache = GSON.fromJson(readAll(new FileInputStream(file), 2 * 1024 * 1024), FingerprintCache.class);
+            FingerprintCache cache;
+            try (InputStream input = new FileInputStream(file)) {
+                cache = GSON.fromJson(readAll(input, 2 * 1024 * 1024), FingerprintCache.class);
+            }
             if (cache == null) cache = new FingerprintCache();
             if (cache.entries == null) cache.entries = new LinkedHashMap<String, Long>();
             return cache;
@@ -1803,7 +1831,10 @@ public final class ImpulseStandaloneBootstrap {
             try {
                 byte[] buffer = new byte[64 * 1024];
                 int read;
-                while ((read = input.read(buffer)) >= 0) digest.update(buffer, 0, read);
+                while ((read = input.read(buffer)) >= 0) {
+                    checkCancelled();
+                    digest.update(buffer, 0, read);
+                }
             } finally { input.close(); }
             return hex(digest.digest());
         } catch (IOException error) {
@@ -1824,7 +1855,10 @@ public final class ImpulseStandaloneBootstrap {
             try {
                 byte[] buffer = new byte[64 * 1024];
                 int read;
-                while ((read = input.read(buffer)) >= 0) digest.update(buffer, 0, read);
+                while ((read = input.read(buffer)) >= 0) {
+                    checkCancelled();
+                    digest.update(buffer, 0, read);
+                }
             } finally { input.close(); }
             return hex(digest.digest());
         } catch (Exception error) { throw new IOException("Unable to calculate " + algorithm + " for " + file.getName(), error); }
@@ -1837,33 +1871,9 @@ public final class ImpulseStandaloneBootstrap {
     }
 
     private static HttpPayload readPayload(URL url, int limit, int connectTimeout, int readTimeout) throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        connection.setConnectTimeout(connectTimeout);
-        connection.setReadTimeout(readTimeout);
-        connection.setRequestProperty("Accept", "application/json");
-        connection.setRequestProperty("User-Agent", "Impulse-Standalone/0.1");
-        int status = connection.getResponseCode();
-        if (status != 200) {
-            connection.disconnect();
-            throw new IOException("HTTP " + status + " while fetching " + url);
-        }
-        InputStream input = connection.getInputStream();
-        try {
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
-            byte[] buffer = new byte[8192];
-            int read;
-            while ((read = input.read(buffer)) >= 0) {
-                if (output.size() + read > limit) throw new IOException("Response exceeds " + limit + " bytes.");
-                output.write(buffer, 0, read);
-            }
-            return new HttpPayload(
-                output.toByteArray(),
-                connection.getHeaderField("X-Impulse-Signature-Algorithm"),
-                connection.getHeaderField("X-Impulse-Public-Key"),
-                connection.getHeaderField("X-Impulse-Key-Id"),
-                connection.getHeaderField("X-Impulse-Signature")
-            );
-        } finally { input.close(); connection.disconnect(); }
+        StandaloneHttp.Response response = StandaloneHttp.request(url, null, limit, connectTimeout, readTimeout,
+            (long) connectTimeout + readTimeout);
+        return new HttpPayload(response.body, response.algorithm, response.publicKey, response.keyId, response.signature);
     }
 
     private static String verifyManifestPayload(HttpPayload payload, String expectedPublicKey) throws IOException {
@@ -1996,6 +2006,13 @@ public final class ImpulseStandaloneBootstrap {
         void message(String text);
         void begin(String text, int steps);
         void progress(String text, int current, int total);
+        default void download(String file, long bytes, long totalBytes, long bytesPerSecond) {
+            int percent = totalBytes > 0L ? (int) Math.min(100L, bytes * 100L / totalBytes) : -1;
+            String speed = bytesPerSecond >= 1048576L
+                ? String.format(Locale.US, "%.1f MB/s", bytesPerSecond / 1048576.0D)
+                : String.format(Locale.US, "%.1f KB/s", bytesPerSecond / 1024.0D);
+            message("Downloading " + file + (percent >= 0 ? " - " + percent + "%" : "") + " - " + speed);
+        }
         void end();
     }
 

@@ -86,7 +86,10 @@ def runtimeJar = tasks.register('runtimeJar', Jar) {
     from sourceSets.main.output
     from project(':common').sourceSets.main.output
     exclude 'com/impulse/bootstrap/**'
+    exclude 'com/impulse/gamecompat/**'
     exclude 'META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator'
+    exclude 'META-INF/services/net.neoforged.neoforgespi.earlywindow.GraphicsBootstrapper'
+    exclude 'META-INF/services/net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider'
 }
 
 tasks.named('jar', Jar).configure {
@@ -96,7 +99,10 @@ tasks.named('jar', Jar).configure {
     }
     from project(':common').sourceSets.main.output
     include 'com/impulse/bootstrap/**'
+    include 'com/impulse/gamecompat/**'
     include 'META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator'
+    include 'META-INF/services/net.neoforged.neoforgespi.earlywindow.GraphicsBootstrapper'
+    include 'META-INF/services/net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider'
     include 'impulse-runtime.embedded'
     include 'impulse-version.properties'
     include '*-runtime.jar'
@@ -104,6 +110,12 @@ tasks.named('jar', Jar).configure {
     include '*.jar'
     include 'icon-mono.png'
     include 'bg_000.jpg'
+    include 'Monocraft.ttf'
+    include 'ImpulseSans.ttf'
+    include 'ImpulseSans-LICENSE.txt'
+    include 'glfailure.txt'
+    include 'impulse-loading-logo.png'
+    include 'neoforged_icon.png'
     from(runtimeJar.flatMap { it.archiveFile }) {
         rename { 'impulse-runtime.embedded' }
     }
@@ -126,6 +138,16 @@ tasks.named('jar', Jar).configure {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
+
+def testGraphicsBootstrapper = tasks.register('testGraphicsBootstrapper', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.impulse.bootstrap.loading.ImpulseGraphicsBootstrapperTest'
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+tasks.named('check').configure { dependsOn testGraphicsBootstrapper }
 
 tasks.named('processResources', ProcessResources).configure {
     dependsOn generateMusicPresenceFont
