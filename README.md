@@ -7,6 +7,10 @@ Impulse is an isolated Minecraft Forge/NeoForge launcher and server manifest mod
 - `app/` - Vite, React, and Electron launcher.
 - `mod/` - Gradle multi-module Forge and NeoForge server mod.
 
+## Developer Guides
+
+- [Game Compat patch authoring](docs/GAME_COMPAT_PATCH_AUTHORING.md) - SPI examples, lifecycle, targeting, signing, publishing, testing, and current limitations.
+
 ## Launcher
 
 Run from `Impulse/app`:

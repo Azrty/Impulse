@@ -29,6 +29,7 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
     public void findCandidates(ILaunchContext launchContext, IDiscoveryPipeline pipeline) {
         try {
             File gameDirectory = FMLLoader.getGamePath().toFile();
+            System.setProperty("impulse.standalone.minecraft_version", FMLLoader.versionInfo().mcVersion());
             StandaloneLaunchLog.start(gameDirectory, ImpulseStandaloneBootstrap.currentImpulseVersion(),
                 FMLLoader.versionInfo().mcVersion(), "neoforge", FMLLoader.versionInfo().neoForgeVersion());
             StandaloneLaunchLog.info("discovery", "Impulse candidate locator started", null);
@@ -62,8 +63,22 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
                 String profileId = System.getProperty("impulse.standalone.profile_id", "");
                 if (!profileId.isBlank()) {
                     StartupNotificationManager.locatorConsumer().ifPresent(consumer -> consumer.accept("Impulse: applying compatibility patches"));
-                    ImpulseGameCompat.markStartupAttempt(gameDirectory, profileId);
-                    ImpulseGameCompat.activateStartupPatches(gameDirectory, profileId);
+                    try {
+                        for (File patch : ImpulseGameCompat.activateStartupPatches(gameDirectory, profileId)) {
+                            try {
+                                if (ImpulseLaunchPlugin.installFromJar(patch, ImpulseGameCompat.approvedTargets(gameDirectory, profileId, patch),
+                                    () -> ImpulseGameCompat.markStartupFailed(gameDirectory, profileId, patch))) {
+                                    ImpulseGameCompat.markStartupAttempt(gameDirectory, profileId);
+                                    ImpulseGameCompat.markStartupActive(gameDirectory, profileId, patch);
+                                }
+                            } catch (Throwable error) {
+                                ImpulseGameCompat.markStartupFailed(gameDirectory, profileId, patch);
+                                StandaloneLaunchLog.error("game-compat", "A startup patch failed; continuing without it", error);
+                            }
+                        }
+                    } catch (Throwable error) {
+                        StandaloneLaunchLog.error("game-compat", "A startup patch failed; continuing without its transformations", error);
+                    }
                 }
                 ImpulseStandaloneBootstrap.setProgressReporter(new NeoForgeProgressReporter());
                 StartupNotificationManager.locatorConsumer().ifPresent(consumer -> consumer.accept("Impulse: loading managed mods"));

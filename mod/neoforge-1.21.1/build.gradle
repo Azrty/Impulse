@@ -90,6 +90,7 @@ def runtimeJar = tasks.register('runtimeJar', Jar) {
     exclude 'META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator'
     exclude 'META-INF/services/net.neoforged.neoforgespi.earlywindow.GraphicsBootstrapper'
     exclude 'META-INF/services/net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider'
+    exclude 'META-INF/services/cpw.mods.modlauncher.serviceapi.ILaunchPluginService'
 }
 
 tasks.named('jar', Jar).configure {
@@ -103,6 +104,7 @@ tasks.named('jar', Jar).configure {
     include 'META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator'
     include 'META-INF/services/net.neoforged.neoforgespi.earlywindow.GraphicsBootstrapper'
     include 'META-INF/services/net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider'
+    include 'META-INF/services/cpw.mods.modlauncher.serviceapi.ILaunchPluginService'
     include 'impulse-runtime.embedded'
     include 'impulse-version.properties'
     include '*-runtime.jar'
@@ -148,6 +150,16 @@ def testGraphicsBootstrapper = tasks.register('testGraphicsBootstrapper', JavaEx
     }
 }
 tasks.named('check').configure { dependsOn testGraphicsBootstrapper }
+
+def testGameCompatLaunchPlugin = tasks.register('testGameCompatLaunchPlugin', JavaExec) {
+    dependsOn tasks.named('testClasses'), tasks.named('jar')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.impulse.bootstrap.neoforge121.ImpulseLaunchPluginTest'
+    systemProperty 'impulse.test.jar', tasks.named('jar').flatMap { it.archiveFile }.get().asFile.absolutePath
+    jvmArgs '--add-opens=java.base/java.lang.invoke=ALL-UNNAMED'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+}
+tasks.named('check').configure { dependsOn testGameCompatLaunchPlugin }
 
 tasks.named('processResources', ProcessResources).configure {
     dependsOn generateMusicPresenceFont

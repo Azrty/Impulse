@@ -184,12 +184,16 @@ export type GameCompatPatch = {
   operating_systems: string[];
   architectures: string[];
   required_mods: Array<{ id: string; version_range: string }>;
+  target_classes?: string[];
 };
 
-export function sanitizeGameCompatCatalog(value: unknown): { schema_version: 1; patches: GameCompatPatch[] } {
-  const source = value as { schema_version?: unknown; patches?: unknown } | null;
+export function sanitizeGameCompatCatalog(value: unknown): { schema_version: 1; revision: number; patches: GameCompatPatch[] } {
+  const source = value as { schema_version?: unknown; revision?: unknown; patches?: unknown } | null;
   if (source?.schema_version !== 1 || !Array.isArray(source.patches)) throw new Error('Invalid Game Compat catalog.');
+  const revision = source.revision ?? 0;
+  if (!Number.isSafeInteger(revision) || Number(revision) < 0) throw new Error('Game Compat catalog revision must be a non-negative integer.');
   const versions = new Set<string>();
+  const fileNames = new Set<string>();
   const patches = source.patches.map((raw, index) => {
     const item = raw as Record<string, unknown> | null;
     const id = boundedText(item?.id, `patches[${index}].id`, 80).toLowerCase();
@@ -200,6 +204,8 @@ export function sanitizeGameCompatCatalog(value: unknown): { schema_version: 1; 
     if (!mode) throw new Error(`${id}.mode must be live or startup.`);
     const fileName = boundedText(item?.file_name, `${id}.file_name`, 180);
     if (!/^[A-Za-z0-9._+-]+\.patch\.jar$/u.test(fileName)) throw new Error(`${id}.file_name must end in .patch.jar.`);
+    if (fileNames.has(fileName)) throw new Error(`Game Compat patch filename is reused: ${fileName}.`);
+    fileNames.add(fileName);
     const downloadUrl = new URL(boundedText(item?.download_url, `${id}.download_url`, 2048));
     if (downloadUrl.origin !== PATCH_ORIGIN || !downloadUrl.pathname.startsWith('/patches/')) throw new Error(`${id}.download_url must use the Impulse patch origin.`);
     const sha512 = boundedText(item?.sha512, `${id}.sha512`, 128).toLowerCase();
@@ -215,6 +221,11 @@ export function sanitizeGameCompatCatalog(value: unknown): { schema_version: 1; 
       });
     };
     if (!Array.isArray(item?.required_mods) || item.required_mods.length === 0 || item.required_mods.length > 32) throw new Error(`${id}.required_mods must be a non-empty list.`);
+    const targetClasses = item?.target_classes;
+    if (targetClasses !== undefined && (mode !== 'startup' || !Array.isArray(targetClasses) || targetClasses.length === 0 || targetClasses.length > 64
+      || targetClasses.some(name => typeof name !== 'string' || !/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/u.test(name)))) {
+      throw new Error(`${id}.target_classes must list valid startup-only class names.`);
+    }
     return {
       id,
       name: boundedText(item?.name, `${id}.name`, 120),
@@ -235,9 +246,10 @@ export function sanitizeGameCompatCatalog(value: unknown): { schema_version: 1; 
         if (!/^[a-z0-9_.-]+$/u.test(modId)) throw new Error(`${id} contains an invalid mod id.`);
         return { id: modId, version_range: boundedText(entry?.version_range ?? '*', `${id}.${modId}.version_range`, 80) };
       }),
+      ...(targetClasses === undefined ? {} : { target_classes: [...new Set(targetClasses as string[])] }),
     } satisfies GameCompatPatch;
   });
-  return { schema_version: 1, patches };
+  return { schema_version: 1, revision: Number(revision), patches };
 }
 
 export function sanitizeBlockedServerRegistry(value: unknown): { schema_version: 1; servers: BlockedServerEntry[] } {
@@ -510,7 +522,12 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   let gameCompatCatalog = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
   async function currentGameCompatCatalog(): Promise<{ body: string; etag: string; signature: string; publicKey: string; keyId: string }> {
     try {
-      gameCompatCatalog = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
+      const candidate = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
+      if (candidate.revision < gameCompatCatalog.revision
+        || (candidate.revision === gameCompatCatalog.revision && JSON.stringify(candidate) !== JSON.stringify(gameCompatCatalog))) {
+        throw new Error('Game Compat catalog revision was rolled back or reused.');
+      }
+      gameCompatCatalog = candidate;
     } catch (error) {
       app.log.warn({ error }, 'Unable to refresh Game Compat catalog; serving last valid copy');
     }

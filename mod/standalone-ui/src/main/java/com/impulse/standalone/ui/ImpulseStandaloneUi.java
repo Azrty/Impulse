@@ -594,6 +594,7 @@ public final class ImpulseStandaloneUi {
                 }
                 case "gameCompatDismiss" -> gameCompatDismiss(operation, command);
                 case "gameCompatRecovery" -> gameCompatRecovery(operation, command);
+                case "gameCompatRestore" -> gameCompatRestore(operation, command);
                 default -> throw new IOException("Unsupported operation: " + operation.kind);
             }
             operation.done(operation.result);
@@ -1026,6 +1027,11 @@ public final class ImpulseStandaloneUi {
 
     private void gameCompatRecovery(Operation operation, JsonObject command) throws Exception {
         ImpulseGameCompat.disableForRecovery(gameDirectory, required(command, "profile_id"));
+        operation.result = state();
+    }
+
+    private void gameCompatRestore(Operation operation, JsonObject command) throws Exception {
+        ImpulseGameCompat.restoreAfterRecovery(gameDirectory, required(command, "profile_id"));
         operation.result = state();
     }
 

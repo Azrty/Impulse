@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { BLOCKED_SERVER_REASON_CODES, createPresenceServer, minecraftOfflineUuid, sanitizeBlockedServerRegistry } from '../src/server.js';
+import { BLOCKED_SERVER_REASON_CODES, createPresenceServer, minecraftOfflineUuid, sanitizeBlockedServerRegistry, sanitizeGameCompatCatalog } from '../src/server.js';
 const registry = JSON.parse(readFileSync(new URL('../data/recognized-mods.json', import.meta.url), 'utf8'));
 const blockedServers = JSON.parse(readFileSync(new URL('../data/blocked-servers.json', import.meta.url), 'utf8'));
 
@@ -81,13 +81,27 @@ test('serves an Ed25519-signed Game Compat catalog with cache headers', async ()
   });
   const response = await app.inject({ method: 'GET', url: '/v1/game-compat/patches' });
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.json(), { schema_version: 1, patches: [] });
+  assert.deepEqual(response.json(), { schema_version: 1, revision: 1, patches: [] });
   assert.equal(response.headers['x-impulse-signature-algorithm'], 'Ed25519');
   assert.equal(response.headers['x-impulse-public-key'], publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'));
   assert.equal(crypto.verify(null, Buffer.from(response.body), publicKey, Buffer.from(String(response.headers['x-impulse-signature']), 'base64url')), true);
   const cached = await app.inject({ method: 'GET', url: '/v1/game-compat/patches', headers: { 'if-none-match': String(response.headers.etag) } });
   assert.equal(cached.statusCode, 304);
   await app.close();
+});
+
+test('Game Compat catalogs validate revision, unique filenames, and startup targets', () => {
+  const patch = {
+    id: 'fixture', name: 'Fixture', description: 'Test patch', version: '1.0.0', mode: 'startup',
+    download_url: 'https://impulse.epivalent.com/patches/fixture-1.0.0.patch.jar',
+    file_name: 'fixture-1.0.0.patch.jar', sha512: 'a'.repeat(128), size: 123,
+    minecraft_versions: ['1.21.1'], loaders: ['neoforge'], operating_systems: ['any'], architectures: ['any'],
+    required_mods: [{ id: 'example', version_range: '>=1.0.0' }], target_classes: ['example.Target'],
+  };
+  assert.equal(sanitizeGameCompatCatalog({ schema_version: 1, revision: 2, patches: [patch] }).revision, 2);
+  assert.throws(() => sanitizeGameCompatCatalog({ schema_version: 1, revision: -1, patches: [] }));
+  assert.throws(() => sanitizeGameCompatCatalog({ schema_version: 1, revision: 2, patches: [patch, { ...patch, id: 'second', version: '2.0.0' }] }));
+  assert.throws(() => sanitizeGameCompatCatalog({ schema_version: 1, revision: 2, patches: [{ ...patch, target_classes: ['../Unsafe'] }] }));
 });
 
 test('keeps Game Compat unavailable when its signing key is missing', async () => {

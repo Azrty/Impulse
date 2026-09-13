@@ -35,7 +35,7 @@ public final class ImpulseNeoForge121 {
         StandaloneLaunchLog.info("runtime", "Impulse NeoForge mod initialized", null);
         if (!ImpulseStandaloneBootstrap.isLauncherLaunch()) {
             String profileId = System.getProperty("impulse.standalone.profile_id", "");
-            if (!profileId.isBlank()) ImpulseGameCompat.activateLivePatches(gameDirectory(), profileId);
+            if (!profileId.isBlank()) ImpulseGameCompat.activateLivePatches(gameDirectory(), profileId, getClass().getClassLoader());
         }
         modEventBus.addListener(ImpulseBadgeNetwork121::registerPayloads);
         NeoForge.EVENT_BUS.register(this);
