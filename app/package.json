@@ -24,8 +24,7 @@
     "build:beta:windows": "cross-env IMPULSE_RELEASE_CHANNEL=beta node scripts/release-win.mjs",
     "build:beta:all": "cross-env IMPULSE_RELEASE_CHANNEL=beta node scripts/release-all.mjs",
     "release:mods": "node scripts/release-mods-r2.mjs",
-    "release:mods:upload": "node scripts/release-mods-r2.mjs --skip-build",
-    "release:patch": "node scripts/publish-game-compat-patch.mjs"
+    "release:mods:upload": "node scripts/release-mods-r2.mjs --skip-build"
   },
   "dependencies": {
     "@xmcl/core": "^2.15.1",

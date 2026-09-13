@@ -612,10 +612,10 @@ for review rather than receive production signing credentials.
 
 ### Upload command
 
-From `Impulse/app`:
+From `Impulse/presence-api`:
 
 ```sh
-npm run release:patch -- /absolute/path/example-live-1.0.0.patch.jar \
+npm run patches:publish -- /absolute/path/example-live-1.0.0.patch.jar \
   /absolute/path/metadata.json
 ```
 
@@ -851,7 +851,7 @@ Paths are relative to the repository root:
 | `presence-api/src/server.ts` | Catalog validation, signing, HTTP endpoint |
 | `presence-api/src/index.ts` | Signing configuration |
 | `presence-api/data/game-compat-patches.json` | Published catalog source |
-| `app/scripts/publish-game-compat-patch.mjs` | Atomic API artifact and catalog publication |
+| `presence-api/scripts/publish-game-compat-patch.mjs` | Atomic API artifact and catalog publication |
 
 When updating the SPI, catalog format, signing policy, or lifecycle, revise this
 guide and its examples together with the implementation.

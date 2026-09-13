@@ -11,10 +11,11 @@
     "dev": "tsx watch src/index.ts",
     "build": "npm run validate:updates && tsc -p tsconfig.json && mkdir -p dist/data && cp data/*.json dist/data/",
     "start": "node dist/src/index.js",
-    "test": "node --import tsx --test test/**/*.test.ts",
+    "test": "node --import tsx --test test/**/*.test.ts scripts/publish-game-compat-patch.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "validate:updates": "tsx scripts/validate-standalone-updates.ts",
     "mods:recognize": "node scripts/recognize-mod.mjs",
+    "patches:publish": "node scripts/publish-game-compat-patch.mjs",
     "servers:block": "node scripts/manage-blocked-server.mjs",
     "servers:unblock": "node scripts/manage-blocked-server.mjs --remove",
     "launcher:enable": "node scripts/manage-launcher-availability.mjs enable",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.2.1",
+    "adm-zip": "^0.5.16",
     "tsx": "^4.20.3",
     "typescript": "^5.9.2"
   }

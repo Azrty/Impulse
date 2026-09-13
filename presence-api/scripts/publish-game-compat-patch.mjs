@@ -5,10 +5,9 @@ import { basename, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import AdmZip from 'adm-zip'
 
-const APP_ROOT = fileURLToPath(new URL('..', import.meta.url))
-const API_ROOT = join(APP_ROOT, '..', 'presence-api')
+const API_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const [jarArgument, metadataArgument] = process.argv.slice(2)
-if (!jarArgument || !metadataArgument) throw new Error('Usage: npm run release:patch -- <patch.jar> <metadata.json>')
+if (!jarArgument || !metadataArgument) throw new Error('Usage: npm run patches:publish -- <patch.jar> <metadata.json>')
 
 const jarPath = resolve(jarArgument)
 const metadataPath = resolve(metadataArgument)

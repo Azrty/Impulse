@@ -44,10 +44,10 @@ Do not put it in Minecraft's `mods/` folder. It is installed by Game Compat.
    target Mekanism/Sable versions. Confirm teleporting into a mounted sublevel,
    delayed tracking, leaving it, reconnecting, and the stabilizer GUI. Confirm
    the server still runs its original JAR and Digital Miner behavior is unchanged.
-2. From `Impulse/app`, run:
+2. From `Impulse/presence-api`, run:
 
    ```sh
-   npm run release:patch -- \
+   npm run patches:publish -- \
      ../mod/patches/aero-mekanism-client/build/libs/aero-mekanism-client-1.0.0.patch.jar \
      ../mod/patches/aero-mekanism-client/metadata.json
    ```
