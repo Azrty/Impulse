@@ -59,7 +59,7 @@ bytecode changes; those changes remain until Minecraft exits.
 ### Components
 
 - **Presence API:** validates catalog metadata and signs the response.
-- **R2:** serves immutable patch JARs under the approved public origin.
+- **Presence API:** signs the catalog and streams immutable patch JARs from its data directory.
 - **Standalone helper:** displays offers, downloads patches, and saves choices.
 - **Early ModLauncher plugin:** transforms explicitly authorized target classes.
 - **NeoForge locator:** initializes enabled startup patches and registers transformers.
@@ -467,7 +467,7 @@ catalog file is `presence-api/data/game-compat-patches.json`:
 | `version` | Numeric `major.minor.patch`, optional prerelease suffix; maximum 64 characters in API |
 | `mode` | Exactly `live` or `startup` |
 | `file_name` | Safe basename ending `.patch.jar`, API maximum 180 characters |
-| `download_url` | `https://impulse.epivalent.com/patches/...`, API maximum 2048 characters |
+| `download_url` | `https://api.impulsemc.com/v1/game-compat/files/<file_name>`, API maximum 2048 characters |
 | `sha512` | Exactly 128 hexadecimal characters; publisher produces lowercase |
 | `size` | Integer byte count, 1 through 67,108,864 (64 MiB) |
 | `minecraft_versions` | Nonempty list of exact versions |
@@ -619,11 +619,11 @@ npm run release:patch -- /absolute/path/example-live-1.0.0.patch.jar \
   /absolute/path/metadata.json
 ```
 
-The script uses `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`.
-`IMPULSE_R2_ACCOUNT_ID` and `IMPULSE_R2_BUCKET` override the defaults from
-`release-lib.mjs`. Its environment loader reads `app/.env` and the parent project
-`.env` location defined by `EROZION_ROOT`; existing environment variables win.
-That loader is simple `KEY=value` parsing, not full shell/dotenv syntax.
+The script requires no R2 credentials. It writes the artifact under
+`presence-api/data/game-compat-files/` and updates
+`presence-api/data/game-compat-patches.json`. Both must be included in the
+Presence API deployment. The download endpoint is public, but only files in
+the validated catalog are served.
 
 ### What the command actually does
 
@@ -631,17 +631,18 @@ That loader is simple `KEY=value` parsing, not full shell/dotenv syntax.
 2. Validates the JAR descriptor, service classes, transformation targets,
    metadata, and complete candidate catalog with the API sanitizer.
 3. Computes SHA-512 and size; increments the catalog revision.
-4. Refuses to overwrite an existing R2 filename, then uploads the artifact.
-5. Atomically replaces the local API catalog. If this fails after upload, the
-   script reports that split outcome and the filename must not be reused.
+4. Refuses to overwrite an existing API artifact filename, then writes the JAR
+   atomically into the API data directory.
+5. Atomically replaces the local API catalog. If this fails, the new artifact
+   is removed; the existing catalog remains unchanged.
 
 **The command does not build the JAR, execute a real NeoForge launch, sign a
 local catalog, or deploy the API.** Signing occurs when the running API serves it.
-Its success message means upload/local catalog update succeeded, not that clients
-can already install the patch.
+Its success message means the local artifact and catalog are prepared, not that
+clients can already install the patch.
 
 Never overwrite a released filename. Immutable
-CDN caches can retain the old bytes and cause hash failures. Increment the version
+HTTP caches can retain the old bytes and cause hash failures. Increment the version
 and use a new filename for every changed artifact.
 
 ### Validate and deploy
@@ -653,10 +654,10 @@ npm test
 npm run build
 ```
 
-Review the catalog diff and deploy its data file with the API using your existing
-deployment procedure. A running API rereads this file on requests; invalid
+Review the catalog diff and deploy both the JSON file and the patch JAR from the
+API data directory using your existing deployment procedure. A running API rereads the catalog on requests; invalid
 refreshes retain its last valid in-memory catalog and log a warning. Invalid
-initial catalog data can prevent API startup.
+initial catalog data or missing/mismatched artifacts can prevent API startup.
 
 Confirm the public response:
 
@@ -666,7 +667,8 @@ curl --fail --show-error -D /tmp/game-compat-headers.txt \
   -o /tmp/game-compat-catalog.json
 ```
 
-Check headers, target entry, artifact URL, exact size, and SHA-512. Header presence
+Download the artifact from its `download_url` on `api.impulsemc.com`; check its
+exact size and SHA-512 against the signed catalog. Header presence
 alone does not prove signature validity: test with an unmodified trusted client.
 
 ### Rollout and rollback
@@ -678,7 +680,7 @@ remote disable command in the current patch schema.
 Removing an entry prevents activation on the next successful catalog refresh.
 Offline clients may continue using a previously signed catalog for seven days.
 For urgent incidents, also publish client-facing operational guidance and retain
-evidence; deletion from R2 is not a substitute for catalog revocation.
+evidence; deleting the API artifact is not a substitute for catalog revocation.
 
 ## 10. Installation and controls
 
@@ -758,7 +760,7 @@ Always follow it with a packaged standalone run.
 | Targeting | Matching/nonmatching Minecraft, loader, OS, architecture, missing mod |
 | Versions | Lower/upper boundary, exact version, prerelease, unresolved metadata |
 | JAR | Missing descriptor, mismatched descriptor, absent/wrong service, broken class |
-| Download | Interrupted stream, wrong size, corrupt hash, unavailable R2 artifact |
+| Download | Interrupted stream, wrong size, corrupt hash, unavailable API artifact |
 | Lifecycle | Enable, disable, repeated toggles, partial failure, resource cleanup |
 | Startup | Success, initialization exception, interrupted launch, recovery |
 | Update | Changed filename, disabled patch, failed update, old artifact retained |
@@ -785,7 +787,7 @@ this command succeeds.
 | Catalog unavailable / HTTP 503 | API signing secret, PEM format, key type, server logs |
 | Signing key not trusted | API key does not match the client's pinned public key |
 | Invalid signature | Body changed after signing, wrong key, corrupt cache |
-| Download URL not trusted | HTTPS host and `/patches/` path; local override does not relax artifact origin |
+| Download URL not trusted | HTTPS `api.impulsemc.com/v1/game-compat/files/` path; local override does not relax artifact origin |
 | SHA-512 validation failure | Reused immutable filename, partial file, artifact/index mismatch |
 | Missing descriptor | Resource path or Gradle packaging omission |
 | Metadata does not match | Embedded id/version/mode differs from selected entry |
@@ -804,7 +806,7 @@ tokens, identities, and private server details before sharing diagnostics.
 ## 13. Security and release checklist
 
 - Review the full source and dependency tree; a valid signature is not a safety review.
-- Keep R2 upload credentials and the catalog signing key separate and private.
+- Keep the catalog signing key private; publishing a JAR does not require it locally.
 - Require reproducible artifacts and preserve the reviewed source revision.
 - Use a unique versioned filename and never mutate published bytes.
 - Target only tested versions; broad `*` ranges increase blast radius.
@@ -849,7 +851,7 @@ Paths are relative to the repository root:
 | `presence-api/src/server.ts` | Catalog validation, signing, HTTP endpoint |
 | `presence-api/src/index.ts` | Signing configuration |
 | `presence-api/data/game-compat-patches.json` | Published catalog source |
-| `app/scripts/publish-game-compat-patch.mjs` | R2 upload and local catalog update |
+| `app/scripts/publish-game-compat-patch.mjs` | Atomic API artifact and catalog publication |
 
 When updating the SPI, catalog format, signing policy, or lifecycle, revise this
 guide and its examples together with the implementation.

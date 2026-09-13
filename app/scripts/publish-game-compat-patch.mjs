@@ -1,11 +1,9 @@
 import { createHash } from 'crypto'
-import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs'
+import { readFileSync, writeFileSync, renameSync, unlinkSync, mkdirSync, linkSync, existsSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { basename, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
-import { HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import AdmZip from 'adm-zip'
-import { loadEnv, requireEnv, IMPULSE_R2_ACCOUNT_ID, IMPULSE_R2_BUCKET } from './release-lib.mjs'
 
 const APP_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const API_ROOT = join(APP_ROOT, '..', 'presence-api')
@@ -61,11 +59,12 @@ const sha512 = createHash('sha512').update(bytes).digest('hex')
 const entry = {
   ...metadata,
   file_name: fileName,
-  download_url: `https://impulse.epivalent.com/patches/${encodeURIComponent(fileName)}`,
+  download_url: `https://api.impulsemc.com/v1/game-compat/files/${encodeURIComponent(fileName)}`,
   sha512,
   size: bytes.length,
 }
-const catalogPath = join(API_ROOT, 'data', 'game-compat-patches.json')
+const catalogPath = resolve(process.env.GAME_COMPAT_CATALOG_FILE || join(API_ROOT, 'data', 'game-compat-patches.json'))
+const filesDirectory = resolve(process.env.GAME_COMPAT_FILES_DIRECTORY || join(API_ROOT, 'data', 'game-compat-files'))
 const catalog = JSON.parse(readFileSync(catalogPath, 'utf8'))
 if (catalog.patches.some(item => item.id === entry.id && item.version === entry.version))
   throw new Error(`Patch ${entry.id} ${entry.version} is already in the catalog. Publish a new version.`)
@@ -75,36 +74,28 @@ catalog.patches = [...catalog.patches, entry]
 const validation = spawnSync(process.execPath, ['--import', 'tsx', 'scripts/validate-game-compat-catalog.ts'], {
   cwd: API_ROOT, input: JSON.stringify(catalog), encoding: 'utf8', timeout: 30_000,
 })
-if (validation.status !== 0) throw new Error(`Catalog validation failed before upload: ${validation.stderr || validation.error || validation.status}`)
+if (validation.status !== 0) throw new Error(`Catalog validation failed before publication: ${validation.stderr || validation.error || validation.status}`)
 
-loadEnv()
-requireEnv('R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY')
-const client = new S3Client({
-  region: 'auto',
-  endpoint: `https://${process.env.IMPULSE_R2_ACCOUNT_ID || IMPULSE_R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: { accessKeyId: process.env.R2_ACCESS_KEY_ID, secretAccessKey: process.env.R2_SECRET_ACCESS_KEY },
-})
+mkdirSync(filesDirectory, { recursive: true })
+const artifactPath = join(filesDirectory, fileName)
+if (existsSync(artifactPath)) throw new Error(`Patch filename already exists in the Presence API: ${fileName}. Use a new version and filename.`)
+const temporaryArtifact = join(filesDirectory, `.${fileName}.tmp-${process.pid}`)
 try {
-  await client.send(new HeadObjectCommand({ Bucket: process.env.IMPULSE_R2_BUCKET || IMPULSE_R2_BUCKET, Key: `patches/${fileName}` }))
-  throw new Error(`Patch filename already exists on R2: ${fileName}. Use a new version and filename.`)
-} catch (error) {
-  if (error.name !== 'NotFound' && error.$metadata?.httpStatusCode !== 404) throw error
+  writeFileSync(temporaryArtifact, bytes, { flag: 'wx' })
+  linkSync(temporaryArtifact, artifactPath)
+} finally {
+  try { unlinkSync(temporaryArtifact) } catch { /* no temporary file */ }
 }
-await client.send(new PutObjectCommand({
-  Bucket: process.env.IMPULSE_R2_BUCKET || IMPULSE_R2_BUCKET,
-  Key: `patches/${fileName}`,
-  Body: bytes,
-  ContentType: 'application/java-archive',
-  CacheControl: 'public, max-age=31536000, immutable',
-}))
 const temporaryCatalog = `${catalogPath}.tmp-${process.pid}`
 try {
   writeFileSync(temporaryCatalog, `${JSON.stringify(catalog, null, 2)}\n`, { flag: 'wx' })
   renameSync(temporaryCatalog, catalogPath)
 } catch (error) {
   try { unlinkSync(temporaryCatalog) } catch { /* no temporary file */ }
-  throw new Error(`Patch uploaded, but local catalog publication failed: ${error.message}. Do not reuse this filename.`)
+  unlinkSync(artifactPath)
+  throw new Error(`Patch catalog publication failed; the new artifact was removed: ${error.message}`)
 }
 console.log(`Published ${entry.id} ${entry.version}`)
 console.log(`SHA-512 ${sha512}`)
-console.log(`Updated ${catalogPath}; deploy presence-api to publish the newly signed catalog.`)
+console.log(`Stored ${artifactPath}`)
+console.log(`Updated ${catalogPath}; deploy presence-api with its data directory to publish the artifact and signed catalog.`)

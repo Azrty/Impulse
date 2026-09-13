@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -93,7 +93,7 @@ test('serves an Ed25519-signed Game Compat catalog with cache headers', async ()
 test('Game Compat catalogs validate revision, unique filenames, and startup targets', () => {
   const patch = {
     id: 'fixture', name: 'Fixture', description: 'Test patch', version: '1.0.0', mode: 'startup',
-    download_url: 'https://impulse.epivalent.com/patches/fixture-1.0.0.patch.jar',
+    download_url: 'https://api.impulsemc.com/v1/game-compat/files/fixture-1.0.0.patch.jar',
     file_name: 'fixture-1.0.0.patch.jar', sha512: 'a'.repeat(128), size: 123,
     minecraft_versions: ['1.21.1'], loaders: ['neoforge'], operating_systems: ['any'], architectures: ['any'],
     required_mods: [{ id: 'example', version_range: '>=1.0.0' }], target_classes: ['example.Target'],
@@ -102,6 +102,48 @@ test('Game Compat catalogs validate revision, unique filenames, and startup targ
   assert.throws(() => sanitizeGameCompatCatalog({ schema_version: 1, revision: -1, patches: [] }));
   assert.throws(() => sanitizeGameCompatCatalog({ schema_version: 1, revision: 2, patches: [patch, { ...patch, id: 'second', version: '2.0.0' }] }));
   assert.throws(() => sanitizeGameCompatCatalog({ schema_version: 1, revision: 2, patches: [{ ...patch, target_classes: ['../Unsafe'] }] }));
+  assert.throws(() => sanitizeGameCompatCatalog({ schema_version: 1, revision: 2,
+    patches: [{ ...patch, download_url: 'https://impulse.epivalent.com/patches/fixture-1.0.0.patch.jar' }] }));
+});
+
+test('serves only SHA-512-validated Game Compat artifacts from the Presence API', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'impulse-api-patches-'));
+  const files = path.join(directory, 'files');
+  const catalogFile = path.join(directory, 'catalog.json');
+  mkdirSync(files);
+  const bytes = Buffer.from('fixture patch bytes');
+  const patch = {
+    id: 'fixture', name: 'Fixture', description: 'Test patch', version: '1.0.0', mode: 'live',
+    download_url: 'https://api.impulsemc.com/v1/game-compat/files/fixture-1.0.0.patch.jar',
+    file_name: 'fixture-1.0.0.patch.jar', sha512: crypto.createHash('sha512').update(bytes).digest('hex'), size: bytes.length,
+    minecraft_versions: ['1.21.1'], loaders: ['neoforge'], operating_systems: ['any'], architectures: ['any'],
+    required_mods: [{ id: 'example', version_range: '*' }],
+  };
+  writeFileSync(path.join(files, patch.file_name), bytes);
+  writeFileSync(catalogFile, JSON.stringify({ schema_version: 1, revision: 2, patches: [patch] }));
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const options = { secret: SECRET, logger: false,
+    gameCompatSigningPrivateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
+    gameCompatCatalogFile: catalogFile, gameCompatFilesDirectory: files };
+  try {
+    const app = await createPresenceServer(options);
+    try {
+      const response = await app.inject({ method: 'GET', url: '/v1/game-compat/files/fixture-1.0.0.patch.jar' });
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.body, bytes.toString());
+      assert.equal(response.headers['content-type'], 'application/java-archive');
+      assert.match(String(response.headers['cache-control']), /immutable/u);
+      const cached = await app.inject({ method: 'GET', url: '/v1/game-compat/files/fixture-1.0.0.patch.jar',
+        headers: { 'if-none-match': String(response.headers.etag) } });
+      assert.equal(cached.statusCode, 304);
+      const unknown = await app.inject({ method: 'GET', url: '/v1/game-compat/files/unknown.patch.jar' });
+      assert.equal(unknown.statusCode, 404);
+      writeFileSync(path.join(files, patch.file_name), 'corrupt');
+      const damaged = await app.inject({ method: 'GET', url: '/v1/game-compat/files/fixture-1.0.0.patch.jar' });
+      assert.equal(damaged.statusCode, 503);
+    } finally { await app.close(); }
+    await assert.rejects(() => createPresenceServer(options));
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('keeps Game Compat unavailable when its signing key is missing', async () => {

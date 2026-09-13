@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
@@ -52,6 +53,8 @@ export type PresenceServerOptions = {
   launcherAvailabilityFile?: string;
   crashWheelFile?: string;
   gameCompatSigningPrivateKey?: string;
+  gameCompatCatalogFile?: string;
+  gameCompatFilesDirectory?: string;
 };
 
 type LauncherAvailability = { schema_version: 1; isLauncherAvailable: boolean };
@@ -116,7 +119,8 @@ const STANDALONE_UPDATE_ICONS = new Set(['sparkles', 'shield-check', 'package-pl
 const EXACT_MOD_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/u;
 const PATCH_ID = /^[a-z0-9][a-z0-9-]{0,79}$/u;
 const SHA512 = /^[0-9a-f]{128}$/u;
-const PATCH_ORIGIN = 'https://impulse.epivalent.com';
+const PATCH_ORIGIN = 'https://api.impulsemc.com';
+const PATCH_FILE_ROUTE = '/v1/game-compat/files/';
 
 function boundedText(value: unknown, name: string, max: number): string {
   if (typeof value !== 'string') throw new Error(`${name} must be a string.`);
@@ -207,7 +211,8 @@ export function sanitizeGameCompatCatalog(value: unknown): { schema_version: 1; 
     if (fileNames.has(fileName)) throw new Error(`Game Compat patch filename is reused: ${fileName}.`);
     fileNames.add(fileName);
     const downloadUrl = new URL(boundedText(item?.download_url, `${id}.download_url`, 2048));
-    if (downloadUrl.origin !== PATCH_ORIGIN || !downloadUrl.pathname.startsWith('/patches/')) throw new Error(`${id}.download_url must use the Impulse patch origin.`);
+    if (downloadUrl.href !== `${PATCH_ORIGIN}${PATCH_FILE_ROUTE}${encodeURIComponent(fileName)}`)
+      throw new Error(`${id}.download_url must use the Presence API patch endpoint.`);
     const sha512 = boundedText(item?.sha512, `${id}.sha512`, 128).toLowerCase();
     if (!SHA512.test(sha512)) throw new Error(`${id}.sha512 is invalid.`);
     const size = Number(item?.size);
@@ -518,8 +523,22 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     const body = JSON.stringify(standaloneUpdates);
     return { body, etag: `"${crypto.createHash('sha256').update(body).digest('hex')}"` };
   }
-  const gameCompatPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/game-compat-patches.json');
+  const gameCompatPath = path.resolve(options.gameCompatCatalogFile
+    ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/game-compat-patches.json'));
+  const gameCompatFilesDirectory = path.resolve(options.gameCompatFilesDirectory
+    ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/game-compat-files'));
+  async function verifyGameCompatFiles(catalog: ReturnType<typeof sanitizeGameCompatCatalog>): Promise<void> {
+    for (const patch of catalog.patches) {
+      const file = path.join(gameCompatFilesDirectory, patch.file_name);
+      const details = await stat(file);
+      if (!details.isFile() || details.size !== patch.size) throw new Error(`Game Compat artifact has the wrong size: ${patch.file_name}`);
+      const digest = crypto.createHash('sha512');
+      for await (const chunk of createReadStream(file)) digest.update(chunk);
+      if (digest.digest('hex') !== patch.sha512) throw new Error(`Game Compat artifact has the wrong SHA-512: ${patch.file_name}`);
+    }
+  }
   let gameCompatCatalog = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
+  await verifyGameCompatFiles(gameCompatCatalog);
   async function currentGameCompatCatalog(): Promise<{ body: string; etag: string; signature: string; publicKey: string; keyId: string }> {
     try {
       const candidate = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
@@ -527,6 +546,7 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
         || (candidate.revision === gameCompatCatalog.revision && JSON.stringify(candidate) !== JSON.stringify(gameCompatCatalog))) {
         throw new Error('Game Compat catalog revision was rolled back or reused.');
       }
+      if (candidate.revision > gameCompatCatalog.revision) await verifyGameCompatFiles(candidate);
       gameCompatCatalog = candidate;
     } catch (error) {
       app.log.warn({ error }, 'Unable to refresh Game Compat catalog; serving last valid copy');
@@ -621,6 +641,32 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     reply.header('X-Impulse-Signature', registry.signature);
     if (request.headers['if-none-match'] === registry.etag) return reply.code(304).send();
     return reply.type('application/json; charset=utf-8').send(registry.body);
+  });
+
+  app.get<{ Params: { fileName: string } }>('/v1/game-compat/files/:fileName', async (request, reply) => {
+    const fileName = request.params.fileName;
+    if (!/^[A-Za-z0-9._+-]+\.patch\.jar$/u.test(fileName)) return reply.code(404).send({ error: 'Patch not found.' });
+    try { await currentGameCompatCatalog(); }
+    catch (error) {
+      app.log.error({ error }, 'Game Compat catalog is unavailable');
+      return reply.code(503).send({ error: 'Game Compat catalog is unavailable.' });
+    }
+    const patch = gameCompatCatalog.patches.find(item => item.file_name === fileName);
+    if (!patch) return reply.code(404).send({ error: 'Patch not found.' });
+    const file = path.join(gameCompatFilesDirectory, fileName);
+    try {
+      const details = await stat(file);
+      if (!details.isFile() || details.size !== patch.size) throw new Error('Patch artifact is missing or damaged.');
+    } catch (error) {
+      app.log.error({ error, fileName }, 'Game Compat artifact is unavailable');
+      return reply.code(503).send({ error: 'Patch artifact is unavailable.' });
+    }
+    reply.header('Cache-Control', 'public, max-age=31536000, immutable');
+    reply.header('ETag', `"${patch.sha512}"`);
+    reply.header('Content-Length', patch.size);
+    reply.header('X-Content-Type-Options', 'nosniff');
+    if (request.headers['if-none-match'] === `"${patch.sha512}"`) return reply.code(304).send();
+    return reply.type('application/java-archive').send(createReadStream(file));
   });
 
   app.get('/v1/launcher/isLauncherAvailable', async (_request, reply) => {

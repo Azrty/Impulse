@@ -15,8 +15,8 @@ public final class ImpulseGameCompatTest {
         require(ImpulseGameCompat.cacheFresh(1000, 1000 + 7 * day), "seven-day cache boundary");
         require(!ImpulseGameCompat.cacheFresh(1000, 1001 + 7 * day), "expired cache");
         require(!ImpulseGameCompat.cacheFresh(2000, 1000), "future-dated cache");
-        java.net.URL origin = new java.net.URL("https://impulse.epivalent.com/patches/first.patch.jar");
-        require("https://impulse.epivalent.com/patches/next.patch.jar".equals(
+        java.net.URL origin = new java.net.URL("https://api.impulsemc.com/v1/game-compat/files/first.patch.jar");
+        require("https://api.impulsemc.com/v1/game-compat/files/next.patch.jar".equals(
             ImpulseGameCompat.resolvePatchRedirect(origin, "next.patch.jar").toString()), "same-origin redirect");
         try {
             ImpulseGameCompat.resolvePatchRedirect(origin, "https://example.com/patches/next.patch.jar");

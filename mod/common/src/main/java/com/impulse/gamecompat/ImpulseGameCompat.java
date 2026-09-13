@@ -48,7 +48,7 @@ import java.util.jar.JarFile;
 /** Signed catalog, installation state and reversible patch lifecycle for standalone profiles. */
 public final class ImpulseGameCompat {
     public static final String CATALOG_URL = "https://api.impulsemc.com/v1/game-compat/patches";
-    public static final String PATCH_ORIGIN = "https://impulse.epivalent.com";
+    public static final String PATCH_ORIGIN = "https://api.impulsemc.com";
     public static final String PINNED_PUBLIC_KEY = "MCowBQYDK2VwAyEAvAE2_S2pNOY7-NkyaN5Kydm1Jlq2g8XkVW2THKbkXRs";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final long CATALOG_MAX_AGE = 7L * 24L * 60L * 60L * 1000L;
@@ -687,9 +687,10 @@ public final class ImpulseGameCompat {
     }
 
     private static void validatePatchUrl(URL url) throws IOException {
-        if (!"https".equalsIgnoreCase(url.getProtocol()) || !"impulse.epivalent.com".equalsIgnoreCase(url.getHost())
+        if (!"https".equalsIgnoreCase(url.getProtocol()) || !"api.impulsemc.com".equalsIgnoreCase(url.getHost())
             || (url.getPort() != -1 && url.getPort() != 443) || url.getUserInfo() != null
-            || !url.getPath().startsWith("/patches/") || url.getPath().contains("..") || url.getRef() != null)
+            || !url.getPath().matches("/v1/game-compat/files/[A-Za-z0-9._+%-]+\\.patch\\.jar")
+            || url.getPath().contains("..") || url.getRef() != null || url.getQuery() != null)
             throw new IOException("Patch download URL is not trusted.");
     }
 
