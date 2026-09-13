@@ -35,7 +35,7 @@ To test against actual installed JARs as well as synthetic fixtures, add:
 -PmekanismJar=/path/to/Mekanism-1.21.1-10.7.19.85.jar
 ```
 
-The artifact is `build/libs/aero-mekanism-client-1.0.0.patch.jar`.
+The artifact is `build/libs/aero-mekanism-client-1.0.1.patch.jar`.
 Do not put it in Minecraft's `mods/` folder. It is installed by Game Compat.
 
 ## Publish
@@ -48,7 +48,7 @@ Do not put it in Minecraft's `mods/` folder. It is installed by Game Compat.
 
    ```sh
    npm run patches:publish -- \
-     ../mod/patches/aero-mekanism-client/build/libs/aero-mekanism-client-1.0.0.patch.jar \
+     ../mod/patches/aero-mekanism-client/build/libs/aero-mekanism-client-1.0.1.patch.jar \
      ../mod/patches/aero-mekanism-client/metadata.json
    ```
 

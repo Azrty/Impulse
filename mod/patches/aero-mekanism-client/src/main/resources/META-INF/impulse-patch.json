@@ -1,11 +1,10 @@
 {
   "id": "aero-mekanism-client",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "mode": "startup",
   "target_classes": [
     "com.jarrettonesource.createmekanismcompat.client.CmcClientSableTracking",
     "com.jarrettonesource.createmekanismcompat.client.CmcClientSubLevelHelper",
-    "net.minecraft.client.Minecraft",
     "mekanism.client.gui.GuiDimensionalStabilizer"
   ]
 }

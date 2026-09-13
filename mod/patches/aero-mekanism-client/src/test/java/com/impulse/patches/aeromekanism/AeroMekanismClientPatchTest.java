@@ -17,7 +17,8 @@ public final class AeroMekanismClientPatchTest {
     public static void main(String[] args) throws Exception {
         AeroMekanismClientPatch patch = new AeroMekanismClientPatch();
         Set<String> targets = patch.targetClasses();
-        require(targets.size() == 4 && targets.stream().noneMatch(name -> name.toLowerCase().contains("miner")), "client-only target list");
+        require(targets.size() == 3 && !targets.contains("net.minecraft.client.Minecraft")
+            && targets.stream().noneMatch(name -> name.toLowerCase().contains("miner")), "client-only target list");
 
         ClassNode tracking = fixture("com/jarrettonesource/createmekanismcompat/client/CmcClientSableTracking");
         tracking.methods.add(new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "applyTeleportState", "()V", null, null));
@@ -29,14 +30,6 @@ public final class AeroMekanismClientPatchTest {
         helper.methods.add(new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "resolve", "()V", null, null));
         patch.transform(helper.name.replace('/', '.'), helper);
         require(helper.methods.stream().filter(method -> "resolve".equals(method.name)).count() >= 2, "sublevel lookup replacement");
-
-        ClassNode minecraft = fixture("net/minecraft/client/Minecraft");
-        MethodNode tick = new MethodNode(Opcodes.ACC_PRIVATE, "tick", "()V", null, null);
-        tick.instructions.add(new InsnNode(Opcodes.RETURN));
-        minecraft.methods.add(tick);
-        patch.transform(minecraft.name.replace('/', '.'), minecraft);
-        require(tick.instructions.getFirst() instanceof org.objectweb.asm.tree.LabelNode
-            && tick.tryCatchBlocks.size() == 1, "guarded retry at tick start");
 
         ClassNode stabilizer = fixture("mekanism/client/gui/GuiDimensionalStabilizer");
         MethodNode gui = new MethodNode(Opcodes.ACC_PUBLIC, "addGuiElements", "()V", null, null);

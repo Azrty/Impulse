@@ -51,6 +51,8 @@ public final class ImpulseLaunchPlugin implements ILaunchPluginService {
                     if (!java.lang.reflect.Modifier.isStatic(field.getModifiers())) field.set(node, field.get(candidate));
                 }
                 changed = true;
+                StandaloneLaunchLog.info("game-compat", "Applied startup transformation",
+                    StandaloneLaunchLog.fields("class", type.getClassName(), "patch", provider.getClass().getName()));
             } catch (Throwable error) {
                 StandaloneLaunchLog.error("game-compat", "Startup transformation failed for " + type.getClassName(), error);
                 unregister(provider);

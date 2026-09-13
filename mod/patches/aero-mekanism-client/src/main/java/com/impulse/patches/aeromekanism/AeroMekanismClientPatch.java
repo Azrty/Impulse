@@ -12,24 +12,23 @@ import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
-import org.objectweb.asm.tree.JumpInsnNode;
-import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
-import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 public final class AeroMekanismClientPatch implements ImpulseClassTransformer {
     private static final String TRACKING = "com.jarrettonesource.createmekanismcompat.client.CmcClientSableTracking";
     private static final String SUBLEVEL = "com.jarrettonesource.createmekanismcompat.client.CmcClientSubLevelHelper";
-    private static final String MINECRAFT = "net.minecraft.client.Minecraft";
     private static final String STABILIZER = "mekanism.client.gui.GuiDimensionalStabilizer";
     private static final String TILE = "mekanism/common/tile/machine/TileEntityDimensionalStabilizer";
     private static final String BLOCK_POS = "()Lnet/minecraft/core/BlockPos;";
 
     @Override
     public Set<String> targetClasses() {
-        return Set.of(TRACKING, SUBLEVEL, MINECRAFT, STABILIZER);
+        // Minecraft itself is loaded before standalone profile selection on many
+        // clients. Targeting it causes the launch plugin to reject the entire
+        // patch, including the teleporter movement fix below.
+        return Set.of(TRACKING, SUBLEVEL, STABILIZER);
     }
 
     @Override
@@ -38,7 +37,6 @@ public final class AeroMekanismClientPatch implements ImpulseClassTransformer {
         switch (className) {
             case TRACKING -> replaceClientClass(node, "CmcClientSableTracking.class", "applyTeleportState");
             case SUBLEVEL -> replaceClientClass(node, "CmcClientSubLevelHelper.class", "resolve");
-            case MINECRAFT -> addTeleportRetry(node);
             case STABILIZER -> fixMountedStabilizerPosition(node);
             default -> throw new IllegalArgumentException("Class is not a patch target: " + className);
         }
@@ -52,26 +50,6 @@ public final class AeroMekanismClientPatch implements ImpulseClassTransformer {
         for (Field field : ClassNode.class.getFields()) {
             if (!Modifier.isStatic(field.getModifiers())) field.set(node, field.get(template));
         }
-    }
-
-    private static void addTeleportRetry(ClassNode node) {
-        MethodNode tick = node.methods.stream()
-            .filter(method -> "tick".equals(method.name) && "()V".equals(method.desc))
-            .findFirst().orElseThrow(() -> new IllegalStateException("Minecraft.tick() is unavailable."));
-        LabelNode start = new LabelNode();
-        LabelNode end = new LabelNode();
-        LabelNode failed = new LabelNode();
-        LabelNode continueTick = new LabelNode();
-        InsnList retry = new InsnList();
-        retry.add(start);
-        retry.add(new MethodInsnNode(Opcodes.INVOKESTATIC, TRACKING.replace('.', '/'), "retryPending", "()V", false));
-        retry.add(end);
-        retry.add(new JumpInsnNode(Opcodes.GOTO, continueTick));
-        retry.add(failed);
-        retry.add(new InsnNode(Opcodes.POP));
-        retry.add(continueTick);
-        tick.instructions.insert(retry);
-        tick.tryCatchBlocks.add(new TryCatchBlockNode(start, end, failed, "java/lang/NoSuchMethodError"));
     }
 
     private static void fixMountedStabilizerPosition(ClassNode node) throws IOException {

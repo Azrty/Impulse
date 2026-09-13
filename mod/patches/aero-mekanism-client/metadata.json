@@ -2,7 +2,7 @@
   "id": "aero-mekanism-client",
   "name": "Mounted Mekanism client fixes",
   "description": "Improves mounted teleporter tracking and the dimensional stabilizer display for the original Create Aeronautics Mekanism Compat client mod.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "mode": "startup",
   "minecraft_versions": ["1.21.1"],
   "loaders": ["neoforge"],
@@ -15,7 +15,6 @@
   "target_classes": [
     "com.jarrettonesource.createmekanismcompat.client.CmcClientSableTracking",
     "com.jarrettonesource.createmekanismcompat.client.CmcClientSubLevelHelper",
-    "net.minecraft.client.Minecraft",
     "mekanism.client.gui.GuiDimensionalStabilizer"
   ]
 }
