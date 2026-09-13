@@ -16,7 +16,7 @@ schema accepting `forge` does not mean the Forge runtime integrates this system.
 5. [Startup patch example](#5-startup-patch-example)
 6. [Descriptors and services](#6-descriptors-and-services)
 7. [Catalog and compatibility](#7-catalog-and-compatibility)
-8. [Signing and trust](#8-signing-and-trust)
+8. [Trust and integrity](#8-trust-and-integrity)
 9. [Publishing](#9-publishing)
 10. [Installation and controls](#10-installation-and-controls)
 11. [Testing](#11-testing)
@@ -33,7 +33,7 @@ Impulse does not rewrite their JAR files.
 
 | Capability | Current behavior |
 | --- | --- |
-| Signed central catalog | Ed25519 signature over the API response body |
+| Catalog source | Fixed HTTPS Presence API endpoint |
 | Artifact integrity | SHA-512 and declared download size |
 | Per-profile storage | Separate `patches/` directory and state file |
 | Matching | Game version, loader, OS, architecture, installed mod IDs and versions |
@@ -74,7 +74,7 @@ bytecode changes; those changes remain until Minecraft exits.
 3. Accepted patches download to the profile. The helper does **not** execute their
    live entry points when changing next-launch preferences.
 4. Before discovery, ModLauncher loads the Impulse launch plugin. After profile
-   selection, the locator re-authorizes enabled patches against the signed catalog,
+   selection, the locator re-authorizes enabled patches against the current catalog,
    initializes legacy startup providers, and registers declared transformer targets.
 5. The Impulse mod constructor initializes enabled live providers.
 6. Reaching the title screen clears the pending-attempt marker, but does not turn
@@ -532,53 +532,21 @@ For a patch ID, the client selects the highest applicable version using this
 comparator. There is no separate Stable/Beta patch channel, no patch-to-patch
 dependency resolution, and no explicit patch conflict graph.
 
-## 8. Signing and trust
+## 8. Trust and integrity
 
-### What is signed
+Game Compat uses the fixed HTTPS Presence API origin and accepts artifacts only
+from its `/v1/game-compat/files/` endpoint. The API validates the catalog and
+serves only files explicitly named in it. Before any JAR is loaded, Standalone
+checks its declared size and recalculates its SHA-512 hash locally.
 
-The API signs the exact UTF-8 body produced by `JSON.stringify` on its sanitized
-catalog, using Ed25519. It returns:
-
-```text
-X-Impulse-Signature-Algorithm: Ed25519
-X-Impulse-Public-Key: <base64url SPKI DER public key>
-X-Impulse-Key-Id: <SHA-256 of SPKI DER>
-X-Impulse-Signature: <base64url signature of response bytes>
-```
-
-Clients compare the public-key text against `PINNED_PUBLIC_KEY` in
-`ImpulseGameCompat.java`, verify the signature, then parse the catalog.
-Reformatting or otherwise changing the response body after signing invalidates it.
-The key ID is returned by the API but is not the client's trust anchor.
-
-The JAR is authenticated indirectly by the SHA-512 inside the signed catalog.
-This is not Java `jarsigner` signing, and a publisher does not need a private key
-embedded in the patch.
-
-### Configure the API
-
-From `presence-api`, run `npm run patches:keygen` to generate a new Ed25519 key
-under `secrets/game-compat-ed25519.pem`. The file is created with restrictive
-permissions and is ignored by Git. The command prints only the public key and
-its key ID, not the private key. Set `GAME_COMPAT_SIGNING_PRIVATE_KEY_FILE` to
-the private key's path (mount it as a secret in Docker), or set
-`GAME_COMPAT_SIGNING_PRIVATE_KEY` to the **PEM contents** of an existing approved
-key. The API accepts literal PEM newlines or escaped `\n` sequences. Never commit
-the private key, print it in logs, or distribute it to patch authors or clients.
-
-An absent, invalid, or non-Ed25519 key makes the endpoint return HTTP 503.
-A newly generated random key will not be trusted by existing clients. Production
-key rotation requires an explicit client trust-anchor migration; changing only
-the server secret breaks catalog verification.
-
-For an isolated development fork, a separate key pair and matching development
-client pin can be used. Never weaken signature checking in the production build.
+There is no separate key or signing-secret setup. HTTPS and the security of
+`api.impulsemc.com` protect the catalog; the SHA-512 value protects the downloaded
+artifact against corruption or an unexpected file response.
 
 ### Endpoint overrides and caching
 
 `-Dimpulse.gameCompat.api=<url>` changes the catalog endpoint only. It does not
-change the pinned key or permitted artifact host. A localhost development API
-must still sign with the key expected by that development client.
+relax the production artifact-host restriction.
 
 The client accepts catalog bodies up to 2 MiB, uses 5-second connect and
 10-second read timeouts, and keeps successful catalogs in memory for 15 minutes.
@@ -589,22 +557,22 @@ impulse/standalone/cache/game-compat/catalog.json
 impulse/standalone/cache/game-compat/highest-revision.txt
 ```
 
-The cache file is an atomic envelope containing the signed response body,
-signature headers and fetch time. The Java client currently expects HTTP 200
+The cache file is an atomic envelope containing the catalog body and fetch time.
+The Java client currently expects HTTP 200
 and does not send `If-None-Match`. Offline fallback is allowed only for seven
-days after a valid fetch; expired or unsigned data cannot activate patches.
+days after a valid fetch; expired data cannot activate patches.
 `highest-revision.txt` stores the highest accepted revision and body digest to
-reject rollback or reuse of a revision with different signed contents. Older
+reject rollback or reuse of a revision with different contents. Older
 two-file cache layouts remain on disk but are not authorization sources.
 An online revocation takes effect at the next catalog refresh (up to 15 minutes
-in one process); a disconnected client may continue using the last signed
+in one process); a disconnected client may continue using the last cached
 catalog for at most seven days.
 
 ## 9. Publishing
 
 Only an authorized Impulse release operator should perform these steps. Patch
 authors should submit source, metadata, test results, and a reproducible artifact
-for review rather than receive production signing credentials.
+for review.
 
 ### Prepare
 
@@ -672,8 +640,8 @@ curl --fail --show-error -D /tmp/game-compat-headers.txt \
 ```
 
 Download the artifact from its `download_url` on `api.impulsemc.com`; check its
-exact size and SHA-512 against the signed catalog. Header presence
-alone does not prove signature validity: test with an unmodified trusted client.
+exact size and SHA-512 against the catalog. Test with an unmodified trusted
+client before publishing.
 
 ### Rollout and rollback
 
@@ -682,7 +650,7 @@ released artifacts available. There is no staged rollout percentage or automatic
 remote disable command in the current patch schema.
 
 Removing an entry prevents activation on the next successful catalog refresh.
-Offline clients may continue using a previously signed catalog for seven days.
+Offline clients may continue using a previously cached catalog for seven days.
 For urgent incidents, also publish client-facing operational guidance and retain
 evidence; deleting the API artifact is not a substitute for catalog revocation.
 
@@ -760,7 +728,7 @@ Always follow it with a packaged standalone run.
 
 | Area | Required cases |
 | --- | --- |
-| Catalog | Correct signature, wrong key, modified body, missing headers, offline API |
+| Catalog | Valid revision, changed/reused revision, malformed data, offline API |
 | Targeting | Matching/nonmatching Minecraft, loader, OS, architecture, missing mod |
 | Versions | Lower/upper boundary, exact version, prerelease, unresolved metadata |
 | JAR | Missing descriptor, mismatched descriptor, absent/wrong service, broken class |
@@ -779,7 +747,7 @@ Build repository checks from `Impulse/mod`:
 ```
 
 Existing Game Compat unit tests cover a small set of version-range/comparison
-cases. They are not a comprehensive signature, targeting, lifecycle, rollback,
+cases. They are not a comprehensive integrity, targeting, lifecycle, rollback,
 or resource-leak test suite. Do not label a patch production-ready solely because
 this command succeeds.
 
@@ -788,9 +756,7 @@ this command succeeds.
 | Symptom | Inspect |
 | --- | --- |
 | No offered patch | Exact game/loader, every required mod, TOML metadata, OS/arch lists |
-| Catalog unavailable / HTTP 503 | API signing secret, PEM format, key type, server logs |
-| Signing key not trusted | API key does not match the client's pinned public key |
-| Invalid signature | Body changed after signing, wrong key, corrupt cache |
+| Catalog unavailable / HTTP 503 | API reachability, catalog JSON, API server logs |
 | Download URL not trusted | HTTPS `api.impulsemc.com/v1/game-compat/files/` path; local override does not relax artifact origin |
 | SHA-512 validation failure | Reused immutable filename, partial file, artifact/index mismatch |
 | Missing descriptor | Resource path or Gradle packaging omission |
@@ -799,7 +765,7 @@ this command succeeds.
 | ClassNotFoundException | Game loader visibility, target loaded too early, omitted private dependency |
 | ServiceConfigurationError | Duplicate API classes, wrong interface, constructor or class linkage failure |
 | Patch says Pending | Enabled for a later runtime phase, but not activated yet |
-| Removed catalog entry still runs | In-memory refresh up to 15 minutes, signed offline cache up to seven days |
+| Removed catalog entry still runs | In-memory refresh up to 15 minutes, cached offline catalog up to seven days |
 | Recovery repeats | Restore only after disabling the suspect patch; inspect prior launch logs |
 
 Inspect per-launch `impulse.log` under `impulse/standalone/logs/`, helper
@@ -809,8 +775,7 @@ tokens, identities, and private server details before sharing diagnostics.
 
 ## 13. Security and release checklist
 
-- Review the full source and dependency tree; a valid signature is not a safety review.
-- Keep the catalog signing key private; publishing a JAR does not require it locally.
+- Review the full source and dependency tree; a catalog entry is not a safety review.
 - Require reproducible artifacts and preserve the reviewed source revision.
 - Use a unique versioned filename and never mutate published bytes.
 - Target only tested versions; broad `*` ranges increase blast radius.
@@ -818,7 +783,7 @@ tokens, identities, and private server details before sharing diagnostics.
 - Do not add telemetry, network endpoints, or permissions without explicit review.
 - Verify cleanup and provide an operational disable procedure.
 - Test with the real packaged client, not just an IDE/classpath harness.
-- Verify the signed public catalog and artifact after deployment.
+- Verify the public catalog and artifact after deployment.
 - Do not promise instant offline revocation, sandboxing, or hot class replacement.
 
 ## 14. Operational limits
@@ -827,12 +792,12 @@ tokens, identities, and private server details before sharing diagnostics.
   clean up; they cannot unload or rewrite an already loaded class.
 - Startup transforms must be registered before ModLauncher sees their target.
   Targets loaded earlier than profile selection are not patchable by this API.
-- Signed catalogs can authorize an installed patch offline for seven days.
+- Cached catalogs can authorize an installed patch offline for seven days.
   Revocation is not instantaneous while a client is disconnected.
 - Metadata scanning happens before NeoForge finishes resolution. JarJar contents
   and runtime decisions made by other mods are outside this scanner's view.
 - The Java classloader is not a permission sandbox. A reviewed patch is trusted
-  code; signatures and SHA-512 establish origin and integrity, not safety.
+  code; HTTPS and SHA-512 establish delivery integrity, not safety.
 
 ## 15. Source map
 
@@ -852,10 +817,9 @@ Paths are relative to the repository root:
 | `mod/modern-1.21-client/src/main/java/com/impulse/modern121/ImpulseStandaloneClient121.java` | In-game controls and readiness |
 | `mod/standalone-ui/src/main/java/com/impulse/standalone/ui/ImpulseStandaloneUi.java` | Helper bridge and Play flow |
 | `mod/standalone-ui/web/src/App.tsx` | Offers and standalone manager |
-| `presence-api/src/server.ts` | Catalog validation, signing, HTTP endpoint |
-| `presence-api/src/index.ts` | Signing configuration |
+| `presence-api/src/server.ts` | Catalog validation and HTTP endpoint |
 | `presence-api/data/game-compat-patches.json` | Published catalog source |
 | `presence-api/scripts/publish-game-compat-patch.mjs` | Atomic API artifact and catalog publication |
 
-When updating the SPI, catalog format, signing policy, or lifecycle, revise this
+When updating the SPI, catalog format, integrity policy, or lifecycle, revise this
 guide and its examples together with the implementation.

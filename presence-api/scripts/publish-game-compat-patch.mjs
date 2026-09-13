@@ -97,4 +97,4 @@ try {
 console.log(`Published ${entry.id} ${entry.version}`)
 console.log(`SHA-512 ${sha512}`)
 console.log(`Stored ${artifactPath}`)
-console.log(`Updated ${catalogPath}; deploy presence-api with its data directory to publish the artifact and signed catalog.`)
+console.log(`Updated ${catalogPath}; deploy presence-api with its data directory to publish the artifact and catalog.`)

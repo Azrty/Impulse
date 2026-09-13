@@ -21,12 +21,8 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
-import java.security.KeyFactory;
-import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
-import java.security.PublicKey;
-import java.security.Signature;
-import java.security.spec.X509EncodedKeySpec;
+import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -45,11 +41,10 @@ import java.net.URLClassLoader;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
-/** Signed catalog, installation state and reversible patch lifecycle for standalone profiles. */
+/** Catalog-backed installation state and reversible patch lifecycle for standalone profiles. */
 public final class ImpulseGameCompat {
     public static final String CATALOG_URL = "https://api.impulsemc.com/v1/game-compat/patches";
     public static final String PATCH_ORIGIN = "https://api.impulsemc.com";
-    public static final String PINNED_PUBLIC_KEY = "MCowBQYDK2VwAyEAvAE2_S2pNOY7-NkyaN5Kydm1Jlq2g8XkVW2THKbkXRs";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final long CATALOG_MAX_AGE = 7L * 24L * 60L * 60L * 1000L;
     private static final Map<String, ActivePatch> ACTIVE = new ConcurrentHashMap<String, ActivePatch>();
@@ -424,7 +419,6 @@ public final class ImpulseGameCompat {
         try {
             if (connection.getResponseCode() != 200) throw new IOException("Game Compat service returned HTTP " + connection.getResponseCode() + ".");
             byte[] bytes = readLimited(connection.getInputStream(), 2 * 1024 * 1024);
-            verifyCatalog(bytes, connection.getHeaderField("X-Impulse-Signature-Algorithm"), connection.getHeaderField("X-Impulse-Public-Key"), connection.getHeaderField("X-Impulse-Signature"));
             Catalog catalog = parseCatalog(bytes);
             if (catalog.revision < 1 || catalog.revision < catalogFloor(gameDirectory)) throw new IOException("Game Compat catalog was rolled back or has no revision.");
             String digest = sha256(bytes);
@@ -438,9 +432,6 @@ public final class ImpulseGameCompat {
             floor.addProperty("sha256", digest);
             JsonObject envelope = new JsonObject();
             envelope.addProperty("body", Base64.getEncoder().encodeToString(bytes));
-            envelope.addProperty("algorithm", connection.getHeaderField("X-Impulse-Signature-Algorithm"));
-            envelope.addProperty("public_key", connection.getHeaderField("X-Impulse-Public-Key"));
-            envelope.addProperty("signature", connection.getHeaderField("X-Impulse-Signature"));
             envelope.addProperty("fetched_at", System.currentTimeMillis());
             writeAtomic(cache, envelope.toString().getBytes(StandardCharsets.UTF_8));
             writeAtomic(catalogFloorFile(gameDirectory), floor.toString().getBytes(StandardCharsets.UTF_8));
@@ -451,25 +442,12 @@ public final class ImpulseGameCompat {
         } finally { connection.disconnect(); }
     }
 
-    private static void verifyCatalog(byte[] bytes, String algorithm, String publicKeyText, String signatureText) throws IOException {
-        if (!"Ed25519".equals(algorithm) || publicKeyText == null || signatureText == null) throw new IOException("Game Compat catalog is not signed.");
-        try {
-            if (!PINNED_PUBLIC_KEY.equals(publicKeyText)) throw new IOException("Game Compat signing key is not trusted.");
-            PublicKey key = KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(Base64.getUrlDecoder().decode(publicKeyText)));
-            Signature verifier = Signature.getInstance("Ed25519");
-            verifier.initVerify(key); verifier.update(bytes);
-            if (!verifier.verify(Base64.getUrlDecoder().decode(signatureText))) throw new IOException("Game Compat catalog signature is invalid.");
-        } catch (IOException error) { throw error; }
-        catch (Exception error) { throw new IOException("Could not verify the Game Compat catalog.", error); }
-    }
-
     private static Catalog cachedCatalog(File gameDirectory) {
         try {
             JsonObject envelope = new JsonParser().parse(new String(Files.readAllBytes(catalogCache(gameDirectory).toPath()), StandardCharsets.UTF_8)).getAsJsonObject();
             long fetchedAt = envelope.get("fetched_at").getAsLong();
             if (!cacheFresh(fetchedAt, System.currentTimeMillis())) return null;
             byte[] bytes = Base64.getDecoder().decode(string(envelope, "body"));
-            verifyCatalog(bytes, string(envelope, "algorithm"), string(envelope, "public_key"), string(envelope, "signature"));
             Catalog catalog = parseCatalog(bytes);
             if (catalog.revision >= 1 && catalog.revision >= catalogFloor(gameDirectory)
                 && (catalogFloorDigest(gameDirectory).isEmpty() || catalogFloorDigest(gameDirectory).equals(sha256(bytes)))) {
@@ -541,11 +519,11 @@ public final class ImpulseGameCompat {
         try { catalog = refresh ? loadCatalog(gameDirectory) : cachedCatalog(gameDirectory); }
         catch (IOException error) {
             catalog = cachedCatalog(gameDirectory);
-            if (catalog == null) throw new IOException("No current signed Game Compat catalog is available.", error);
+            if (catalog == null) throw new IOException("No current Game Compat catalog is available.", error);
             memoryCatalog = catalog;
             memoryCatalogAt = System.currentTimeMillis();
         }
-        if (catalog == null) throw new IOException("No current signed Game Compat catalog is available.");
+        if (catalog == null) throw new IOException("No current Game Compat catalog is available.");
         Map<String, String> mods = scanInstalledMods(gameDirectory, profileId);
         for (Patch entry : catalog.patches) {
             if (!installed.id.equals(entry.id) || !installed.version.equals(entry.version)
@@ -727,10 +705,10 @@ public final class ImpulseGameCompat {
             String text = readEntry(jar, "META-INF/impulse-patch.json");
             if (text == null) throw new IOException("Patch is missing META-INF/impulse-patch.json.");
             JsonObject descriptor = new JsonParser().parse(text).getAsJsonObject();
-            if (!expected.id.equals(string(descriptor, "id")) || !expected.version.equals(string(descriptor, "version")) || !expected.mode.equals(string(descriptor, "mode"))) throw new IOException("Patch metadata does not match the signed catalog.");
+            if (!expected.id.equals(string(descriptor, "id")) || !expected.version.equals(string(descriptor, "version")) || !expected.mode.equals(string(descriptor, "mode"))) throw new IOException("Patch metadata does not match the catalog.");
             if (expected.target_classes != null && !expected.target_classes.isEmpty()) {
                 if (!descriptor.has("target_classes") || !expected.target_classes.equals(GSON.fromJson(descriptor.get("target_classes"), List.class)))
-                    throw new IOException("Patch targets do not match the signed catalog.");
+                    throw new IOException("Patch targets do not match the catalog.");
             }
         } catch (RuntimeException error) { throw new IOException("Patch metadata is invalid.", error); }
     }

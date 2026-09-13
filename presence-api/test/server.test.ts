@@ -72,19 +72,11 @@ test('keeps CurseForge verification disabled without an Impulse API key', async 
   await app.close();
 });
 
-test('serves an Ed25519-signed Game Compat catalog with cache headers', async () => {
-  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
-  const app = await createPresenceServer({
-    secret: SECRET,
-    logger: false,
-    gameCompatSigningPrivateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-  });
+test('serves a Game Compat catalog with cache headers without a signing secret', async () => {
+  const app = await createPresenceServer({ secret: SECRET, logger: false });
   const response = await app.inject({ method: 'GET', url: '/v1/game-compat/patches' });
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), { schema_version: 1, revision: 1, patches: [] });
-  assert.equal(response.headers['x-impulse-signature-algorithm'], 'Ed25519');
-  assert.equal(response.headers['x-impulse-public-key'], publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'));
-  assert.equal(crypto.verify(null, Buffer.from(response.body), publicKey, Buffer.from(String(response.headers['x-impulse-signature']), 'base64url')), true);
   const cached = await app.inject({ method: 'GET', url: '/v1/game-compat/patches', headers: { 'if-none-match': String(response.headers.etag) } });
   assert.equal(cached.statusCode, 304);
   await app.close();
@@ -121,9 +113,7 @@ test('serves only SHA-512-validated Game Compat artifacts from the Presence API'
   };
   writeFileSync(path.join(files, patch.file_name), bytes);
   writeFileSync(catalogFile, JSON.stringify({ schema_version: 1, revision: 2, patches: [patch] }));
-  const { privateKey } = crypto.generateKeyPairSync('ed25519');
   const options = { secret: SECRET, logger: false,
-    gameCompatSigningPrivateKey: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
     gameCompatCatalogFile: catalogFile, gameCompatFilesDirectory: files };
   try {
     const app = await createPresenceServer(options);
@@ -146,12 +136,6 @@ test('serves only SHA-512-validated Game Compat artifacts from the Presence API'
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('keeps Game Compat unavailable when its signing key is missing', async () => {
-  const app = await createPresenceServer({ secret: SECRET, logger: false });
-  const response = await app.inject({ method: 'GET', url: '/v1/game-compat/patches' });
-  assert.equal(response.statusCode, 503);
-  await app.close();
-});
 
 test('proxies CurseForge fingerprints and validates Minecraft and loader compatibility', async () => {
   const calls: Array<{ url: string; headers: HeadersInit; body: string }> = [];

@@ -52,7 +52,6 @@ export type PresenceServerOptions = {
   bugReportMaxStorageBytes?: number;
   launcherAvailabilityFile?: string;
   crashWheelFile?: string;
-  gameCompatSigningPrivateKey?: string;
   gameCompatCatalogFile?: string;
   gameCompatFilesDirectory?: string;
 };
@@ -539,7 +538,7 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   }
   let gameCompatCatalog = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
   await verifyGameCompatFiles(gameCompatCatalog);
-  async function currentGameCompatCatalog(): Promise<{ body: string; etag: string; signature: string; publicKey: string; keyId: string }> {
+  async function currentGameCompatCatalog(): Promise<{ body: string; etag: string }> {
     try {
       const candidate = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
       if (candidate.revision < gameCompatCatalog.revision
@@ -552,18 +551,9 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
       app.log.warn({ error }, 'Unable to refresh Game Compat catalog; serving last valid copy');
     }
     const body = JSON.stringify(gameCompatCatalog);
-    const privateKeyText = options.gameCompatSigningPrivateKey?.trim();
-    if (!privateKeyText) throw new Error('GAME_COMPAT_SIGNING_PRIVATE_KEY is not configured.');
-    const privateKey = crypto.createPrivateKey(privateKeyText.replace(/\\n/g, '\n'));
-    if (privateKey.asymmetricKeyType !== 'ed25519') throw new Error('Game Compat signing key must be Ed25519.');
-    const publicKeyObject = crypto.createPublicKey(privateKey);
-    const publicKey = publicKeyObject.export({ format: 'der', type: 'spki' }) as Buffer;
     return {
       body,
       etag: `"${crypto.createHash('sha256').update(body).digest('hex')}"`,
-      signature: crypto.sign(null, Buffer.from(body), privateKey).toString('base64url'),
-      publicKey: publicKey.toString('base64url'),
-      keyId: crypto.createHash('sha256').update(publicKey).digest('hex'),
     };
   }
   const launcherAvailabilityPath = path.resolve(options.launcherAvailabilityFile
@@ -635,10 +625,6 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     }
     reply.header('Cache-Control', 'public, max-age=900, stale-if-error=86400');
     reply.header('ETag', registry.etag);
-    reply.header('X-Impulse-Signature-Algorithm', 'Ed25519');
-    reply.header('X-Impulse-Public-Key', registry.publicKey);
-    reply.header('X-Impulse-Key-Id', registry.keyId);
-    reply.header('X-Impulse-Signature', registry.signature);
     if (request.headers['if-none-match'] === registry.etag) return reply.code(304).send();
     return reply.type('application/json; charset=utf-8').send(registry.body);
   });

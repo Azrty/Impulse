@@ -16,7 +16,6 @@
     "validate:updates": "tsx scripts/validate-standalone-updates.ts",
     "mods:recognize": "node scripts/recognize-mod.mjs",
     "patches:publish": "node scripts/publish-game-compat-patch.mjs",
-    "patches:keygen": "node scripts/generate-game-compat-key.mjs",
     "servers:block": "node scripts/manage-blocked-server.mjs",
     "servers:unblock": "node scripts/manage-blocked-server.mjs --remove",
     "launcher:enable": "node scripts/manage-launcher-availability.mjs enable",

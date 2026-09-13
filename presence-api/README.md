@@ -13,14 +13,9 @@ Set `CURSEFORGE_API_KEY` in `.env` to enable the optional CurseForge mod-verific
 
 The API automatically loads `presence-api/.env`. Environment variables supplied by Docker or the operating system take priority over values in that file.
 
-Game Compat needs an Ed25519 signing key. Run `npm run patches:keygen` to create
-`secrets/game-compat-ed25519.pem`, then set
-`GAME_COMPAT_SIGNING_PRIVATE_KEY_FILE=./secrets/game-compat-ed25519.pem` in `.env`.
-For Docker, mount the private file read-only and set the variable to its path
-inside the container. Never commit the file. A newly generated key has a new
-public key: existing Impulse clients will reject its catalogs until the
-`PINNED_PUBLIC_KEY` in the mod is updated and released. If an older approved
-private key exists, configure that key instead of generating a replacement.
+Game Compat needs no separate signing key or secret. The API publishes a
+validated catalog and serves only catalog-listed patch artifacts. Standalone
+still validates each downloaded JAR's declared size and SHA-512 before loading it.
 
 Build the production container with `docker build -t impulse-presence .`. Run exactly one replica because state is intentionally in memory, and expose it behind HTTPS at `api.impulsemc.com`.
 
