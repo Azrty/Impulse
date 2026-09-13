@@ -557,10 +557,14 @@ embedded in the patch.
 
 ### Configure the API
 
-Set `GAME_COMPAT_SIGNING_PRIVATE_KEY` to the **PEM contents** of the approved
-Ed25519 private key, not a filename. The API accepts literal PEM newlines or
-escaped `\n` sequences. Use a deployment secret manager; never commit this value,
-print it in logs, or distribute it to patch authors or clients.
+From `presence-api`, run `npm run patches:keygen` to generate a new Ed25519 key
+under `secrets/game-compat-ed25519.pem`. The file is created with restrictive
+permissions and is ignored by Git. The command prints only the public key and
+its key ID, not the private key. Set `GAME_COMPAT_SIGNING_PRIVATE_KEY_FILE` to
+the private key's path (mount it as a secret in Docker), or set
+`GAME_COMPAT_SIGNING_PRIVATE_KEY` to the **PEM contents** of an existing approved
+key. The API accepts literal PEM newlines or escaped `\n` sequences. Never commit
+the private key, print it in logs, or distribute it to patch authors or clients.
 
 An absent, invalid, or non-Ed25519 key makes the endpoint return HTTP 503.
 A newly generated random key will not be trusted by existing clients. Production
