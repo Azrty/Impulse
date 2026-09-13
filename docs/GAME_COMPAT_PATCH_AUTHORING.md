@@ -117,7 +117,6 @@ example-live-patch/
   build.gradle
   libs/
     impulse-common.jar
-  metadata.json
   src/main/java/example/compat/ExampleLivePatch.java
   src/main/resources/META-INF/impulse-patch.json
   src/main/resources/META-INF/services/
@@ -423,7 +422,7 @@ Check that compiled classes, descriptor, and service file are present and that
 
 ### Publication metadata
 
-Create `metadata.json` outside the JAR:
+Put the complete publication metadata in the embedded descriptor:
 
 ```json
 {
@@ -446,16 +445,8 @@ Create `metadata.json` outside the JAR:
 and a tested version before trying the offer flow. There is no unconditional
 all-clients patch: `required_mods` must be nonempty.
 
-The publisher adds `file_name`, `download_url`, `sha512`, and `size`. The API
-catalog file is `presence-api/data/game-compat-patches.json`:
-
-```json
-{
-  "schema_version": 1,
-  "revision": 1,
-  "patches": []
-}
-```
+The Presence API derives `file_name`, `download_url`, `sha512`, and `size`
+from the built JAR. Do not put them in the descriptor.
 
 ### Field reference
 
@@ -466,17 +457,12 @@ catalog file is `presence-api/data/game-compat-patches.json`:
 | `description` | Nonempty text, API maximum 500 characters |
 | `version` | Numeric `major.minor.patch`, optional prerelease suffix; maximum 64 characters in API |
 | `mode` | Exactly `live` or `startup` |
-| `file_name` | Safe basename ending `.patch.jar`, API maximum 180 characters |
-| `download_url` | `https://api.impulsemc.com/v1/game-compat/files/<file_name>`, API maximum 2048 characters |
-| `sha512` | Exactly 128 hexadecimal characters; publisher produces lowercase |
-| `size` | Integer byte count, 1 through 67,108,864 (64 MiB) |
 | `minecraft_versions` | Nonempty list of exact versions |
 | `loaders` | `neoforge` or `forge`; runtime support is narrower than the schema |
 | `operating_systems` | `windows`, `macos`, `linux`, or `any` |
 | `architectures` | `x64`, `arm64`, or `any` |
 | `required_mods` | Nonempty list of `{id, version_range}` objects; all must match |
-| `target_classes` | Startup transformer only; 1-64 explicit binary class names, identical in metadata and descriptor |
-| `revision` | Catalog-wide positive integer; increase for every publication or revocation |
+| `target_classes` | Startup transformer only; 1-64 explicit binary class names |
 
 The API limits each targeting list to 32 entries. String-list values have an
 80-character bound. Required mod IDs allow lowercase letters, digits, `_`, `.`,
@@ -535,9 +521,11 @@ dependency resolution, and no explicit patch conflict graph.
 ## 8. Trust and integrity
 
 Game Compat uses the fixed HTTPS Presence API origin and accepts artifacts only
-from its `/v1/game-compat/files/` endpoint. The API validates the catalog and
-serves only files explicitly named in it. Before any JAR is loaded, Standalone
-checks its declared size and recalculates its SHA-512 hash locally.
+from its `/v1/game-compat/files/` endpoint. The API scans
+`presence-api/data/game-compat-files/` for `.patch.jar` files, validates each
+embedded descriptor and its required service entry, calculates the SHA-512 and
+size, then generates the catalog at request time. Before any JAR is loaded,
+Standalone recalculates the declared SHA-512 hash locally.
 
 There is no separate key or signing-secret setup. HTTPS and the security of
 `api.impulsemc.com` protect the catalog; the SHA-512 value protects the downloaded
@@ -554,17 +542,14 @@ Signed disk-cache files are under:
 
 ```text
 impulse/standalone/cache/game-compat/catalog.json
-impulse/standalone/cache/game-compat/highest-revision.txt
 ```
 
 The cache file is an atomic envelope containing the catalog body and fetch time.
 The Java client currently expects HTTP 200
 and does not send `If-None-Match`. Offline fallback is allowed only for seven
 days after a valid fetch; expired data cannot activate patches.
-`highest-revision.txt` stores the highest accepted revision and body digest to
-reject rollback or reuse of a revision with different contents. Older
-two-file cache layouts remain on disk but are not authorization sources.
-An online revocation takes effect at the next catalog refresh (up to 15 minutes
+Older cache files remain on disk but are not authorization sources. An online
+revocation takes effect at the next catalog refresh (up to 15 minutes
 in one process); a disconnected client may continue using the last cached
 catalog for at most seven days.
 
@@ -577,41 +562,19 @@ for review.
 ### Prepare
 
 1. Choose a unique ID and a new, immutable versioned filename.
-2. Match embedded descriptor values to publication metadata.
+2. Put all publication metadata in the embedded descriptor.
 3. Inspect the service file and compile without bundled SPI classes.
 4. Test the patch against each advertised target, including disable/failure paths.
 5. Review source and dependencies for permissions, licenses, and unwanted effects.
 
-### Upload command
+### Build and deploy
 
-From `Impulse/presence-api`:
-
-```sh
-npm run patches:publish -- /absolute/path/example-live-1.0.0.patch.jar \
-  /absolute/path/metadata.json
-```
-
-The script requires no R2 credentials. It writes the artifact under
-`presence-api/data/game-compat-files/` and updates
-`presence-api/data/game-compat-patches.json`. Both must be included in the
-Presence API deployment. The download endpoint is public, but only files in
-the validated catalog are served.
-
-### What the command actually does
-
-1. Reads both input files.
-2. Validates the JAR descriptor, service classes, transformation targets,
-   metadata, and complete candidate catalog with the API sanitizer.
-3. Computes SHA-512 and size; increments the catalog revision.
-4. Refuses to overwrite an existing API artifact filename, then writes the JAR
-   atomically into the API data directory.
-5. Atomically replaces the local API catalog. If this fails, the new artifact
-   is removed; the existing catalog remains unchanged.
-
-**The command does not build the JAR, execute a real NeoForge launch, sign a
-local catalog, or deploy the API.** Signing occurs when the running API serves it.
-Its success message means the local artifact and catalog are prepared, not that
-clients can already install the patch.
+The Gradle `jar` task copies the versioned `.patch.jar` to
+`presence-api/data/game-compat-files/`. Commit that artifact with the API and
+deploy the API normally. No publishing command, R2 upload, sidecar metadata,
+or hand-maintained catalog is involved. The API will reject a JAR that does not
+contain a complete `META-INF/impulse-patch.json` and the appropriate live or
+startup service entry.
 
 Never overwrite a released filename. Immutable
 HTTP caches can retain the old bytes and cause hash failures. Increment the version
@@ -626,10 +589,10 @@ npm test
 npm run build
 ```
 
-Review the catalog diff and deploy both the JSON file and the patch JAR from the
-API data directory using your existing deployment procedure. A running API rereads the catalog on requests; invalid
-refreshes retain its last valid in-memory catalog and log a warning. Invalid
-initial catalog data or missing/mismatched artifacts can prevent API startup.
+Review the generated endpoint response and deploy the patch JAR from the API
+data directory using the existing deployment procedure. A running API rescans
+patch artifacts on requests; invalid JARs are ignored and logged while the last
+valid catalog remains available.
 
 Confirm the public response:
 
@@ -818,8 +781,7 @@ Paths are relative to the repository root:
 | `mod/standalone-ui/src/main/java/com/impulse/standalone/ui/ImpulseStandaloneUi.java` | Helper bridge and Play flow |
 | `mod/standalone-ui/web/src/App.tsx` | Offers and standalone manager |
 | `presence-api/src/server.ts` | Catalog validation and HTTP endpoint |
-| `presence-api/data/game-compat-patches.json` | Published catalog source |
-| `presence-api/scripts/publish-game-compat-patch.mjs` | Atomic API artifact and catalog publication |
+| `presence-api/data/game-compat-files/*.patch.jar` | Versioned patch artifacts and embedded publication metadata |
 
 When updating the SPI, catalog format, integrity policy, or lifecycle, revise this
 guide and its examples together with the implementation.

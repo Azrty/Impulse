@@ -44,19 +44,17 @@ Do not put it in Minecraft's `mods/` folder. It is installed by Game Compat.
    target Mekanism/Sable versions. Confirm teleporting into a mounted sublevel,
    delayed tracking, leaving it, reconnecting, and the stabilizer GUI. Confirm
    the server still runs its original JAR and Digital Miner behavior is unchanged.
-2. From `Impulse/presence-api`, run:
+2. Build the patch from this directory. The build automatically copies the
+   resulting JAR into the Presence API patch directory:
 
    ```sh
-   npm run patches:publish -- \
-     ../mod/patches/aero-mekanism-client/build/libs/aero-mekanism-client-1.0.1.patch.jar \
-     ../mod/patches/aero-mekanism-client/metadata.json
+   ../../gradlew -p . check jar
    ```
 
-3. Review and deploy the updated `presence-api/data/game-compat-patches.json`.
-   The API must have `GAME_COMPAT_SIGNING_PRIVATE_KEY` for the Ed25519 key
-   already pinned in Impulse clients. Deploy both the catalog JSON and the JAR
-   in `presence-api/data/game-compat-files/`, then test the signed catalog and
-   its API download URL before offering the patch to players.
+3. Commit and deploy `presence-api/data/game-compat-files/aero-mekanism-client-1.0.1.patch.jar`.
+   The API reads its complete publication metadata from
+   `META-INF/impulse-patch.json`, calculates SHA-512 itself, and exposes the
+   patch automatically. There is no separate metadata file or publish command.
 4. In Standalone, select the server, accept the Game Compat offer, install the
    patch, then restart Minecraft to activate a startup patch. The in-game Game
    Compat screen can disable it for the next launch.

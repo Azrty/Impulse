@@ -25,6 +25,16 @@ dependencies {
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
 tasks.named('jar') { archiveFileName = "aero-mekanism-client-${project.version}.patch.jar" }
 
+// The Presence API discovers patch releases from this directory. The embedded
+// descriptor is the sole publication metadata, so no separate catalog is kept.
+def presenceApiPatchDirectory = file('../../../presence-api/data/game-compat-files')
+def syncForPresenceApi = tasks.register('syncForPresenceApi', Copy) {
+    dependsOn tasks.named('jar')
+    from(tasks.named('jar').flatMap { it.archiveFile })
+    into(presenceApiPatchDirectory)
+}
+tasks.named('jar') { finalizedBy(syncForPresenceApi) }
+
 def verifyPatch = tasks.register('verifyPatch', JavaExec) {
     dependsOn tasks.named('testClasses')
     classpath = sourceSets.test.runtimeClasspath

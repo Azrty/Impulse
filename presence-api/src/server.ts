@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import multipart from '@fastify/multipart';
+import AdmZip from 'adm-zip';
 
 const CHALLENGE_TTL_MS = 90_000;
 const PRESENCE_TTL_MS = 120_000;
@@ -52,7 +53,6 @@ export type PresenceServerOptions = {
   bugReportMaxStorageBytes?: number;
   launcherAvailabilityFile?: string;
   crashWheelFile?: string;
-  gameCompatCatalogFile?: string;
   gameCompatFilesDirectory?: string;
 };
 
@@ -522,31 +522,52 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     const body = JSON.stringify(standaloneUpdates);
     return { body, etag: `"${crypto.createHash('sha256').update(body).digest('hex')}"` };
   }
-  const gameCompatPath = path.resolve(options.gameCompatCatalogFile
-    ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/game-compat-patches.json'));
   const gameCompatFilesDirectory = path.resolve(options.gameCompatFilesDirectory
     ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/game-compat-files'));
-  async function verifyGameCompatFiles(catalog: ReturnType<typeof sanitizeGameCompatCatalog>): Promise<void> {
-    for (const patch of catalog.patches) {
-      const file = path.join(gameCompatFilesDirectory, patch.file_name);
-      const details = await stat(file);
-      if (!details.isFile() || details.size !== patch.size) throw new Error(`Game Compat artifact has the wrong size: ${patch.file_name}`);
-      const digest = crypto.createHash('sha512');
-      for await (const chunk of createReadStream(file)) digest.update(chunk);
-      if (digest.digest('hex') !== patch.sha512) throw new Error(`Game Compat artifact has the wrong SHA-512: ${patch.file_name}`);
+  async function discoverGameCompatCatalog(): Promise<ReturnType<typeof sanitizeGameCompatCatalog>> {
+    let fileNames: string[] = [];
+    try { fileNames = await readdir(gameCompatFilesDirectory); }
+    catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    const patches: GameCompatPatch[] = [];
+    for (const fileName of fileNames.filter(name => /^[A-Za-z0-9._+-]+\.patch\.jar$/u.test(name)).sort()) {
+      try {
+        const file = path.join(gameCompatFilesDirectory, fileName);
+        const details = await stat(file);
+        if (!details.isFile() || details.size < 1 || details.size > 64 * 1024 * 1024) throw new Error('invalid file size');
+        const bytes = await readFile(file);
+        const archive = new AdmZip(bytes);
+        const descriptorEntry = archive.getEntry('META-INF/impulse-patch.json');
+        if (!descriptorEntry || descriptorEntry.header.size < 2 || descriptorEntry.header.size > 1024 * 1024) throw new Error('missing patch descriptor');
+        const descriptor = JSON.parse(descriptorEntry.getData().toString('utf8'));
+        const serviceName = descriptor.mode === 'live'
+          ? 'META-INF/services/com.impulse.gamecompat.ImpulseCompatPatch'
+          : 'META-INF/services/com.impulse.bootstrap.neoforge121.ImpulseClassTransformer';
+        const serviceEntry = archive.getEntry(serviceName);
+        if (!serviceEntry || !serviceEntry.getData().toString('utf8').split(/\r?\n/u).some(line => line.trim() && !line.trim().startsWith('#'))) {
+          throw new Error(`missing ${descriptor.mode} patch service`);
+        }
+        const candidate = sanitizeGameCompatCatalog({
+          schema_version: 1,
+          revision: 1,
+          patches: [{
+            ...descriptor,
+            file_name: fileName,
+            download_url: `${PATCH_ORIGIN}${PATCH_FILE_ROUTE}${encodeURIComponent(fileName)}`,
+            sha512: crypto.createHash('sha512').update(bytes).digest('hex'),
+            size: bytes.length,
+          }],
+        }).patches[0];
+        patches.push(candidate);
+      } catch (error) {
+        app.log.warn({ error, fileName }, 'Ignoring invalid Game Compat patch artifact');
+      }
     }
+    return sanitizeGameCompatCatalog({ schema_version: 1, revision: 1, patches });
   }
-  let gameCompatCatalog = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
-  await verifyGameCompatFiles(gameCompatCatalog);
+  let gameCompatCatalog = await discoverGameCompatCatalog();
   async function currentGameCompatCatalog(): Promise<{ body: string; etag: string }> {
     try {
-      const candidate = sanitizeGameCompatCatalog(JSON.parse(await readFile(gameCompatPath, 'utf8')));
-      if (candidate.revision < gameCompatCatalog.revision
-        || (candidate.revision === gameCompatCatalog.revision && JSON.stringify(candidate) !== JSON.stringify(gameCompatCatalog))) {
-        throw new Error('Game Compat catalog revision was rolled back or reused.');
-      }
-      if (candidate.revision > gameCompatCatalog.revision) await verifyGameCompatFiles(candidate);
-      gameCompatCatalog = candidate;
+      gameCompatCatalog = await discoverGameCompatCatalog();
     } catch (error) {
       app.log.warn({ error }, 'Unable to refresh Game Compat catalog; serving last valid copy');
     }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import AdmZip from 'adm-zip';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -98,41 +99,43 @@ test('Game Compat catalogs validate revision, unique filenames, and startup targ
     patches: [{ ...patch, download_url: 'https://impulse.epivalent.com/patches/fixture-1.0.0.patch.jar' }] }));
 });
 
-test('serves only SHA-512-validated Game Compat artifacts from the Presence API', async () => {
+test('discovers and serves Game Compat artifacts from their embedded descriptors', async () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'impulse-api-patches-'));
   const files = path.join(directory, 'files');
-  const catalogFile = path.join(directory, 'catalog.json');
   mkdirSync(files);
-  const bytes = Buffer.from('fixture patch bytes');
   const patch = {
     id: 'fixture', name: 'Fixture', description: 'Test patch', version: '1.0.0', mode: 'live',
-    download_url: 'https://api.impulsemc.com/v1/game-compat/files/fixture-1.0.0.patch.jar',
-    file_name: 'fixture-1.0.0.patch.jar', sha512: crypto.createHash('sha512').update(bytes).digest('hex'), size: bytes.length,
     minecraft_versions: ['1.21.1'], loaders: ['neoforge'], operating_systems: ['any'], architectures: ['any'],
     required_mods: [{ id: 'example', version_range: '*' }],
   };
-  writeFileSync(path.join(files, patch.file_name), bytes);
-  writeFileSync(catalogFile, JSON.stringify({ schema_version: 1, revision: 2, patches: [patch] }));
-  const options = { secret: SECRET, logger: false,
-    gameCompatCatalogFile: catalogFile, gameCompatFilesDirectory: files };
+  const fileName = 'fixture-1.0.0.patch.jar';
+  const archive = new AdmZip();
+  archive.addFile('META-INF/impulse-patch.json', Buffer.from(JSON.stringify(patch)));
+  archive.addFile('META-INF/services/com.impulse.gamecompat.ImpulseCompatPatch', Buffer.from('example.FixturePatch\n'));
+  const bytes = archive.toBuffer();
+  writeFileSync(path.join(files, fileName), bytes);
+  const options = { secret: SECRET, logger: false, gameCompatFilesDirectory: files };
   try {
     const app = await createPresenceServer(options);
     try {
-      const response = await app.inject({ method: 'GET', url: '/v1/game-compat/files/fixture-1.0.0.patch.jar' });
+      const catalog = await app.inject({ method: 'GET', url: '/v1/game-compat/patches' });
+      assert.equal(catalog.statusCode, 200);
+      assert.equal(catalog.json().patches[0].file_name, fileName);
+      assert.equal(catalog.json().patches[0].sha512, crypto.createHash('sha512').update(bytes).digest('hex'));
+      const response = await app.inject({ method: 'GET', url: `/v1/game-compat/files/${fileName}` });
       assert.equal(response.statusCode, 200);
       assert.equal(response.body, bytes.toString());
       assert.equal(response.headers['content-type'], 'application/java-archive');
       assert.match(String(response.headers['cache-control']), /immutable/u);
-      const cached = await app.inject({ method: 'GET', url: '/v1/game-compat/files/fixture-1.0.0.patch.jar',
+      const cached = await app.inject({ method: 'GET', url: `/v1/game-compat/files/${fileName}`,
         headers: { 'if-none-match': String(response.headers.etag) } });
       assert.equal(cached.statusCode, 304);
       const unknown = await app.inject({ method: 'GET', url: '/v1/game-compat/files/unknown.patch.jar' });
       assert.equal(unknown.statusCode, 404);
-      writeFileSync(path.join(files, patch.file_name), 'corrupt');
-      const damaged = await app.inject({ method: 'GET', url: '/v1/game-compat/files/fixture-1.0.0.patch.jar' });
-      assert.equal(damaged.statusCode, 503);
+      writeFileSync(path.join(files, fileName), 'corrupt');
+      const damaged = await app.inject({ method: 'GET', url: `/v1/game-compat/files/${fileName}` });
+      assert.equal(damaged.statusCode, 404);
     } finally { await app.close(); }
-    await assert.rejects(() => createPresenceServer(options));
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

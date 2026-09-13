@@ -1,7 +1,17 @@
 {
   "id": "aero-mekanism-client",
+  "name": "Mounted Mekanism client fixes",
+  "description": "Client-side fixes for mounted Mekanism teleporters and the Dimensional Stabilizer interface.",
   "version": "1.0.1",
   "mode": "startup",
+  "minecraft_versions": ["1.21.1"],
+  "loaders": ["neoforge"],
+  "operating_systems": ["any"],
+  "architectures": ["any"],
+  "required_mods": [
+    { "id": "mekanism", "version_range": "[10.7.19,10.8.0)" },
+    { "id": "create_mekanism_compat", "version_range": "0.1.21" }
+  ],
   "target_classes": [
     "com.jarrettonesource.createmekanismcompat.client.CmcClientSableTracking",
     "com.jarrettonesource.createmekanismcompat.client.CmcClientSubLevelHelper",

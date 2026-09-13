@@ -409,8 +409,7 @@ public final class ImpulseGameCompat {
 
     private static synchronized Catalog loadCatalog(File gameDirectory) throws IOException {
         if (memoryCatalog != null && System.currentTimeMillis() < memoryCatalogExpiresAt
-            && System.currentTimeMillis() - memoryCatalogAt < 15L * 60L * 1000L
-            && memoryCatalog.revision >= catalogFloor(gameDirectory)) return memoryCatalog;
+            && System.currentTimeMillis() - memoryCatalogAt < 15L * 60L * 1000L) return memoryCatalog;
         String endpoint = System.getProperty("impulse.gameCompat.api", CATALOG_URL);
         HttpURLConnection connection = (HttpURLConnection) new URL(endpoint).openConnection();
         connection.setConnectTimeout(5000); connection.setReadTimeout(10000);
@@ -420,21 +419,13 @@ public final class ImpulseGameCompat {
             if (connection.getResponseCode() != 200) throw new IOException("Game Compat service returned HTTP " + connection.getResponseCode() + ".");
             byte[] bytes = readLimited(connection.getInputStream(), 2 * 1024 * 1024);
             Catalog catalog = parseCatalog(bytes);
-            if (catalog.revision < 1 || catalog.revision < catalogFloor(gameDirectory)) throw new IOException("Game Compat catalog was rolled back or has no revision.");
-            String digest = sha256(bytes);
-            String previousDigest = catalogFloorDigest(gameDirectory);
-            if (catalog.revision == catalogFloor(gameDirectory) && !previousDigest.isEmpty() && !previousDigest.equals(digest))
-                throw new IOException("Game Compat catalog revision was reused with different contents.");
+            if (catalog.revision < 1) throw new IOException("Game Compat catalog has no revision.");
             File cache = catalogCache(gameDirectory);
             if (!cache.getParentFile().isDirectory()) cache.getParentFile().mkdirs();
-            JsonObject floor = new JsonObject();
-            floor.addProperty("revision", catalog.revision);
-            floor.addProperty("sha256", digest);
             JsonObject envelope = new JsonObject();
             envelope.addProperty("body", Base64.getEncoder().encodeToString(bytes));
             envelope.addProperty("fetched_at", System.currentTimeMillis());
             writeAtomic(cache, envelope.toString().getBytes(StandardCharsets.UTF_8));
-            writeAtomic(catalogFloorFile(gameDirectory), floor.toString().getBytes(StandardCharsets.UTF_8));
             memoryCatalog = catalog;
             memoryCatalogAt = System.currentTimeMillis();
             memoryCatalogExpiresAt = memoryCatalogAt + CATALOG_MAX_AGE;
@@ -449,8 +440,7 @@ public final class ImpulseGameCompat {
             if (!cacheFresh(fetchedAt, System.currentTimeMillis())) return null;
             byte[] bytes = Base64.getDecoder().decode(string(envelope, "body"));
             Catalog catalog = parseCatalog(bytes);
-            if (catalog.revision >= 1 && catalog.revision >= catalogFloor(gameDirectory)
-                && (catalogFloorDigest(gameDirectory).isEmpty() || catalogFloorDigest(gameDirectory).equals(sha256(bytes)))) {
+            if (catalog.revision >= 1) {
                 memoryCatalogExpiresAt = fetchedAt + CATALOG_MAX_AGE;
                 return catalog;
             }
@@ -459,24 +449,9 @@ public final class ImpulseGameCompat {
         catch (Exception ignored) { return null; }
     }
 
-    private static long catalogFloor(File gameDirectory) {
-        try { return new JsonParser().parse(new String(Files.readAllBytes(catalogFloorFile(gameDirectory).toPath()), StandardCharsets.UTF_8)).getAsJsonObject().get("revision").getAsLong(); }
-        catch (Exception ignored) { return 1; }
-    }
-
     static boolean cacheFresh(long fetchedAt, long now) {
         long age = now - fetchedAt;
         return age >= 0 && age <= CATALOG_MAX_AGE;
-    }
-
-    private static String catalogFloorDigest(File gameDirectory) {
-        try { return string(new JsonParser().parse(new String(Files.readAllBytes(catalogFloorFile(gameDirectory).toPath()), StandardCharsets.UTF_8)).getAsJsonObject(), "sha256"); }
-        catch (Exception ignored) { return ""; }
-    }
-
-    private static String sha256(byte[] bytes) throws IOException {
-        try { return hex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
-        catch (GeneralSecurityException error) { throw new IOException("SHA-256 is unavailable.", error); }
     }
 
     private static void writeAtomic(File target, byte[] bytes) throws IOException {
@@ -770,7 +745,6 @@ public final class ImpulseGameCompat {
     private static File patchDirectory(File gameDirectory, String profileId) { return new File(profileRoot(gameDirectory, profileId), "patches"); }
     private static File stateFile(File gameDirectory, String profileId) { return new File(profileRoot(gameDirectory, profileId), "game-compat.json"); }
     private static File catalogCache(File gameDirectory) { return new File(new File(new File(gameDirectory, "impulse/standalone/cache"), "game-compat"), "catalog.json"); }
-    private static File catalogFloorFile(File gameDirectory) { return new File(catalogCache(gameDirectory).getParentFile(), "highest-revision.txt"); }
 
     public interface Progress { void update(String message, int completed, int total); }
     public static final class Snapshot { public boolean catalog_available; public boolean offer_required, recovery_available, recovery_disabled; public String offer_signature = ""; public String error; public List<PatchView> patches = new ArrayList<PatchView>(); }
