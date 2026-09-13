@@ -6,3 +6,8 @@ mod/.release-tools/
 mod/dist/
 mod/**/.gradle/
 mod/**/build/
+!mod/patches/aero-mekanism-client/build/
+mod/patches/aero-mekanism-client/build/*
+!mod/patches/aero-mekanism-client/build/libs/
+mod/patches/aero-mekanism-client/build/libs/*
+!mod/patches/aero-mekanism-client/build/libs/*.patch.jar
