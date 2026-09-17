@@ -73,8 +73,9 @@ test('keeps CurseForge verification disabled without an Impulse API key', async 
   await app.close();
 });
 
-test('serves a Game Compat catalog with cache headers without a signing secret', async () => {
-  const app = await createPresenceServer({ secret: SECRET, logger: false });
+test('serves a LivePatch catalog with cache headers without a signing secret', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'impulse-empty-game-compat-api-'));
+  const app = await createPresenceServer({ secret: SECRET, logger: false, gameCompatFilesDirectory: directory });
   const response = await app.inject({ method: 'GET', url: '/v1/game-compat/patches' });
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), { schema_version: 1, revision: 1, patches: [] });
@@ -83,7 +84,7 @@ test('serves a Game Compat catalog with cache headers without a signing secret',
   await app.close();
 });
 
-test('Game Compat catalogs validate revision, unique filenames, and startup targets', () => {
+test('LivePatch catalogs validate revision, unique filenames, and startup targets', () => {
   const patch = {
     id: 'fixture', name: 'Fixture', description: 'Test patch', version: '1.0.0', mode: 'startup',
     download_url: 'https://api.impulsemc.com/v1/game-compat/files/fixture-1.0.0.patch.jar',
@@ -99,7 +100,7 @@ test('Game Compat catalogs validate revision, unique filenames, and startup targ
     patches: [{ ...patch, download_url: 'https://impulse.epivalent.com/patches/fixture-1.0.0.patch.jar' }] }));
 });
 
-test('discovers and serves Game Compat artifacts from their embedded descriptors', async () => {
+test('discovers and serves LivePatch artifacts from their embedded descriptors', async () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'impulse-api-patches-'));
   const files = path.join(directory, 'files');
   mkdirSync(files);

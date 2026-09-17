@@ -128,7 +128,7 @@ public final class ImpulseGameCompat {
         State state = loadState(gameDirectory, profileId);
         Map<String, Installed> oldPatches = new LinkedHashMap<String, Installed>(state.patches);
         File directory = patchDirectory(gameDirectory, profileId);
-        if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("Could not create the Game Compat patch directory.");
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("Could not create the LivePatch directory.");
         List<String> ids = selectedIds == null ? Collections.<String>emptyList() : new ArrayList<String>(new java.util.LinkedHashSet<String>(selectedIds));
         for (String id : ids) if (!available.containsKey(id)) throw new IOException("Patch is unavailable or incompatible: " + id);
         File staging = Files.createTempDirectory(directory.toPath(), ".install-").toFile();
@@ -240,7 +240,7 @@ public final class ImpulseGameCompat {
     private static PatchView setEnabled(File gameDirectory, String profileId, String id, boolean enabled, boolean inGame) throws Exception {
         State state = loadState(gameDirectory, profileId);
         Installed installed = state.patches.get(id);
-        if (installed == null) throw new IOException("Game Compat patch is not installed.");
+        if (installed == null) throw new IOException("LivePatch is not installed.");
         if (enabled) requireAuthorized(gameDirectory, profileId, installed, currentMinecraftVersion(), "neoforge", !inGame);
         if ("live".equals(installed.mode) && inGame && !state.recovery_disabled) {
             if (enabled) activate(gameDirectory, profileId, installed, false);
@@ -416,10 +416,10 @@ public final class ImpulseGameCompat {
         connection.setRequestProperty("Accept", "application/json");
         connection.setRequestProperty("User-Agent", "ImpulseGameCompat/1.0 (+https://impulsemc.com)");
         try {
-            if (connection.getResponseCode() != 200) throw new IOException("Game Compat service returned HTTP " + connection.getResponseCode() + ".");
+            if (connection.getResponseCode() != 200) throw new IOException("LivePatch service returned HTTP " + connection.getResponseCode() + ".");
             byte[] bytes = readLimited(connection.getInputStream(), 2 * 1024 * 1024);
             Catalog catalog = parseCatalog(bytes);
-            if (catalog.revision < 1) throw new IOException("Game Compat catalog has no revision.");
+            if (catalog.revision < 1) throw new IOException("LivePatch catalog has no revision.");
             File cache = catalogCache(gameDirectory);
             if (!cache.getParentFile().isDirectory()) cache.getParentFile().mkdirs();
             JsonObject envelope = new JsonObject();
@@ -464,9 +464,9 @@ public final class ImpulseGameCompat {
     private static Catalog parseCatalog(byte[] bytes) throws IOException {
         try {
             Catalog catalog = GSON.fromJson(new String(bytes, StandardCharsets.UTF_8), Catalog.class);
-            if (catalog == null || catalog.schema_version != 1 || catalog.patches == null) throw new IOException("Invalid Game Compat catalog.");
+            if (catalog == null || catalog.schema_version != 1 || catalog.patches == null) throw new IOException("Invalid LivePatch catalog.");
             return catalog;
-        } catch (RuntimeException error) { throw new IOException("Invalid Game Compat catalog.", error); }
+        } catch (RuntimeException error) { throw new IOException("Invalid LivePatch catalog.", error); }
     }
 
     private static List<Patch> newestApplicable(Catalog catalog, String minecraftVersion, String loader, Map<String, String> mods) {
@@ -494,11 +494,11 @@ public final class ImpulseGameCompat {
         try { catalog = refresh ? loadCatalog(gameDirectory) : cachedCatalog(gameDirectory); }
         catch (IOException error) {
             catalog = cachedCatalog(gameDirectory);
-            if (catalog == null) throw new IOException("No current Game Compat catalog is available.", error);
+            if (catalog == null) throw new IOException("No current LivePatch catalog is available.", error);
             memoryCatalog = catalog;
             memoryCatalogAt = System.currentTimeMillis();
         }
-        if (catalog == null) throw new IOException("No current Game Compat catalog is available.");
+        if (catalog == null) throw new IOException("No current LivePatch catalog is available.");
         Map<String, String> mods = scanInstalledMods(gameDirectory, profileId);
         for (Patch entry : catalog.patches) {
             if (!installed.id.equals(entry.id) || !installed.version.equals(entry.version)

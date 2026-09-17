@@ -60,11 +60,14 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
                 FMLLoader.versionInfo().neoForgeVersion()
             );
             if (result.active && result.managedModsDirectory != null) {
-                String profileId = System.getProperty("impulse.standalone.profile_id", "");
+                String profileId = result.profile == null ? "" : result.profile.id;
                 if (!profileId.isBlank()) {
                     StartupNotificationManager.locatorConsumer().ifPresent(consumer -> consumer.accept("Impulse: applying compatibility patches"));
                     try {
-                        for (File patch : ImpulseGameCompat.activateStartupPatches(gameDirectory, profileId)) {
+                        java.util.List<File> patches = ImpulseGameCompat.activateStartupPatches(gameDirectory, profileId);
+                        StandaloneLaunchLog.info("game-compat", "Evaluating startup patches",
+                            StandaloneLaunchLog.fields("profile", profileId, "count", patches.size()));
+                        for (File patch : patches) {
                             try {
                                 if (ImpulseLaunchPlugin.installFromJar(patch, ImpulseGameCompat.approvedTargets(gameDirectory, profileId, patch),
                                     () -> ImpulseGameCompat.markStartupFailed(gameDirectory, profileId, patch))) {

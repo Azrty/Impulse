@@ -46,6 +46,7 @@ public class ImpulseLoadingOverlay extends LoadingOverlay {
     private final Object displayWindow;
     private final ProgressMeter progressMeter;
     private float currentProgress;
+    private long lastProgressUpdateNanos = System.nanoTime();
     private long fadeOutStart = -1L;
 
     public ImpulseLoadingOverlay(final Minecraft mc, final ReloadInstance reloader, final Consumer<Optional<Throwable>> errorConsumer, Object displayWindow) {
@@ -66,8 +67,16 @@ public class ImpulseLoadingOverlay extends LoadingOverlay {
     public void render(final GuiGraphics graphics, final int mouseX, final int mouseY, final float partialTick) {
         long millis = Util.getMillis();
         float fadeouttimer = this.fadeOutStart > -1L ? (float) (millis - this.fadeOutStart) / 1000.0F : -1.0F;
-        this.currentProgress = Mth.clamp(this.currentProgress * 0.95F + this.reload.getActualProgress() * 0.05F, 0.0F, 1.0F);
+        long now = System.nanoTime();
+        float elapsed = Math.min(0.25F, Math.max(0F, (now - this.lastProgressUpdateNanos) / 1_000_000_000F));
+        this.lastProgressUpdateNanos = now;
+        boolean reloadDone = this.reload.isDone();
+        float targetProgress = reloadDone ? 1F : this.reload.getActualProgress();
+        float smoothing = 1F - (float) Math.exp(-8F * elapsed);
+        this.currentProgress = reloadDone ? 1F
+                : Mth.clamp(Math.max(this.currentProgress, this.currentProgress + (targetProgress - this.currentProgress) * smoothing), 0.0F, 1.0F);
         progressMeter.setAbsolute(Mth.ceil(this.currentProgress * 1000));
+        invoke(displayWindow, "updateMojangProgress", new Class<?>[] { double.class }, (double) this.currentProgress);
         var fade = 1.0F - Mth.clamp(fadeouttimer - 1.0F, 0.0F, 1.0F);
         RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, fade);
         if (fadeouttimer >= 1.0F) {

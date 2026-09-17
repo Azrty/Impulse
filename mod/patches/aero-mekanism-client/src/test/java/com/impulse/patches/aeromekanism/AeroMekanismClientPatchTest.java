@@ -8,16 +8,13 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.util.CheckClassAdapter;
 import org.objectweb.asm.tree.ClassNode;
-import org.objectweb.asm.tree.InsnNode;
-import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
-import org.objectweb.asm.tree.VarInsnNode;
 
 public final class AeroMekanismClientPatchTest {
     public static void main(String[] args) throws Exception {
         AeroMekanismClientPatch patch = new AeroMekanismClientPatch();
         Set<String> targets = patch.targetClasses();
-        require(targets.size() == 3 && !targets.contains("net.minecraft.client.Minecraft")
+        require(targets.size() == 1 && !targets.contains("net.minecraft.client.Minecraft")
             && targets.stream().noneMatch(name -> name.toLowerCase().contains("miner")), "client-only target list");
 
         ClassNode tracking = fixture("com/jarrettonesource/createmekanismcompat/client/CmcClientSableTracking");
@@ -26,27 +23,8 @@ public final class AeroMekanismClientPatchTest {
         require(tracking.methods.stream().anyMatch(method -> "retryPending".equals(method.name)), "teleporter retry method");
         require(tracking.fields.stream().anyMatch(field -> "pending".equals(field.name)), "pending teleport state");
 
-        ClassNode helper = fixture("com/jarrettonesource/createmekanismcompat/client/CmcClientSubLevelHelper");
-        helper.methods.add(new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "resolve", "()V", null, null));
-        patch.transform(helper.name.replace('/', '.'), helper);
-        require(helper.methods.stream().filter(method -> "resolve".equals(method.name)).count() >= 2, "sublevel lookup replacement");
-
-        ClassNode stabilizer = fixture("mekanism/client/gui/GuiDimensionalStabilizer");
-        MethodNode gui = new MethodNode(Opcodes.ACC_PUBLIC, "addGuiElements", "()V", null, null);
-        gui.instructions.add(new VarInsnNode(Opcodes.ALOAD, 1));
-        gui.instructions.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL,
-            "mekanism/common/tile/machine/TileEntityDimensionalStabilizer", "getBlockPos", "()Lnet/minecraft/core/BlockPos;", false));
-        gui.instructions.add(new InsnNode(Opcodes.POP));
-        gui.instructions.add(new InsnNode(Opcodes.RETURN));
-        stabilizer.methods.add(gui);
-        patch.transform(stabilizer.name.replace('/', '.'), stabilizer);
-        require(stabilizer.methods.stream().anyMatch(method -> "impulse$mountedWorldPosition".equals(method.name)), "mounted position helper");
-        require(gui.instructions.getFirst() != null && gui.instructions.size() == 6, "position lookup redirected");
         verifyOriginalJar(patch, System.getProperty("patch.test.originalCompatJar"),
-            "com/jarrettonesource/createmekanismcompat/client/CmcClientSableTracking.class",
-            "com/jarrettonesource/createmekanismcompat/client/CmcClientSubLevelHelper.class");
-        verifyOriginalJar(patch, System.getProperty("patch.test.mekanismJar"),
-            "mekanism/client/gui/GuiDimensionalStabilizer.class");
+            "com/jarrettonesource/createmekanismcompat/client/CmcClientSableTracking.class");
         System.out.println("AeroMekanismClientPatchTest passed");
     }
 

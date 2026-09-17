@@ -9,6 +9,7 @@ import static org.lwjgl.opengl.GL32C.*;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.DoubleSupplier;
 import java.util.function.Supplier;
 import net.neoforged.fml.loading.progress.Message;
 import net.neoforged.fml.loading.progress.ProgressMeter;
@@ -161,7 +162,7 @@ public class RenderElement {
             float side = 44f * ctx.scale();
             float total = side + 14f * ctx.scale() + font.stringWidth("IMPULSE");
             float x0 = (ctx.scaledWidth() - total) / 2f;
-            float y0 = 164f * ctx.scale();
+            float y0 = 170f * ctx.scale();
             QuadHelper.loadQuad(bb, x0, x0 + side, y0, y0 + side, 0f, 1f, 0f, 1f, ctx.colourScheme().foreground().packedint(globalAlpha));
         }).get();
         return new RenderElement(() -> logo.then(text));
@@ -174,28 +175,23 @@ public class RenderElement {
                 : current.contains("download") || current.contains("verif") || current.contains("file") ? 1
                 : current.contains("mod") || current.contains("registr") ? 2 : 3;
             String[] stages = { "Server", "Files", "Mods", "Game" };
-            int gap = 100 * ctx.scale();
+            int gap = 86 * ctx.scale();
             int start = ctx.scaledWidth() / 2 - gap * 3 / 2;
-            int y = 352 * ctx.scale();
+            int y = 360 * ctx.scale();
             ctx.elementShader().updateRenderTypeUniform(ElementShader.RenderType.BAR);
             bb.begin(SimpleBufferBuilder.Format.POS_TEX_COLOR, SimpleBufferBuilder.Mode.QUADS);
-            for (int index = 0; index < stages.length - 1; index++) {
-                int opacity = index < active ? 125 : 30;
-                QuadHelper.loadQuad(bb, start + index * gap + 9 * ctx.scale(), start + (index + 1) * gap - 9 * ctx.scale(),
-                        y, y + ctx.scale(), 0, 0, 0, 0, ctx.colourScheme().foreground().packedint(Math.min(globalAlpha, opacity)));
-            }
             for (int index = 0; index < stages.length; index++) {
-                int opacity = index <= active ? 230 : 55;
-                arc(bb, start + index * gap, y + ctx.scale() / 2f, 3 * ctx.scale(),
-                        (index < active ? 3 : 1) * ctx.scale(), 0, Math.PI * 2,
+                int opacity = index == active ? 235 : index < active ? 135 : 42;
+                arc(bb, start + index * gap, y + ctx.scale() / 2f, index == active ? 3f * ctx.scale() : 2f * ctx.scale(),
+                        index <= active ? 2f * ctx.scale() : ctx.scale(), 0, Math.PI * 2,
                         ctx.colourScheme().foreground().packedint(Math.min(globalAlpha, opacity)));
             }
             bb.draw();
             renderText(font, (vertices, fnt, context) -> {
             for (int index = 0; index < stages.length; index++) {
-                int colour = ctx.colourScheme().foreground().packedint(Math.min(globalAlpha, index == active ? 230 : index < active ? 140 : 65));
+                int colour = ctx.colourScheme().foreground().packedint(Math.min(globalAlpha, index == active ? 205 : index < active ? 105 : 45));
                 int x = start + index * gap - fnt.stringWidth(stages[index]) / 2;
-                fnt.generateVerticesForTexts(x, 365 * ctx.scale(), vertices, new SimpleFont.DisplayText(stages[index], colour));
+                fnt.generateVerticesForTexts(x, 372 * ctx.scale(), vertices, new SimpleFont.DisplayText(stages[index], colour));
             }
             }, bb, ctx);
         });
@@ -208,65 +204,152 @@ public class RenderElement {
     }
 
     private static ProgressMeter activeMeter(List<ProgressMeter> meters) {
-        for (ProgressMeter meter : meters) {
-            if (meter.label().getText().startsWith("Impulse:")) return meter;
+        for (int index = meters.size() - 1; index >= 0; index--) {
+            ProgressMeter meter = meters.get(index);
+            if (meter.label().getText().startsWith("Impulse:") && meter.progress() < 1f) return meter;
+        }
+        for (int index = meters.size() - 1; index >= 0; index--) {
+            ProgressMeter meter = meters.get(index);
+            if (meter.progress() < 1f) return meter;
         }
         return meters.isEmpty() ? null : meters.get(meters.size() - 1);
     }
 
-    private static String friendlyLabel(String raw) {
+    private static String usefulLabel(String raw) {
         String lower = raw == null ? "" : raw.toLowerCase();
-        if (lower.contains("profile selection")) return "Choose a server to get started";
-        if (lower.contains("download") || lower.contains("verif") || lower.contains("server")) return raw;
+        if (lower.contains("profile selection")) return "Waiting for your server";
+        if (lower.contains("discover")) return "Discovering mods";
+        if (lower.contains("registr")) return "Building game systems";
+        if (lower.contains("sided setup")) return "Starting Minecraft";
+        if (raw == null || raw.isBlank()) return "Preparing Minecraft";
+        return raw.replace("Impulse: ", "");
+    }
+
+    private static String playfulLabel() {
         String[] messages = { "Baking potatoes", "Untangling the cables", "Putting the kettle on",
                 "Looking for the other sock", "Adding the finishing touches", "Making room for adventure" };
         return messages[(int) ((System.nanoTime() / 5_000_000_000L) % messages.length)];
     }
 
     public static RenderElement progressBars(SimpleFont font) {
-        return new RenderElement(() -> (bb, ctx, frame) -> RenderElement.startupProgressBars(font, bb, ctx, frame));
+        return new RenderElement(() -> {
+            ProgressState state = new ProgressState();
+            return (bb, ctx, frame) -> RenderElement.startupProgressBars(font, bb, ctx, frame, state);
+        });
     }
 
     public static RenderElement performanceBar(SimpleFont font) {
         return new RenderElement(() -> (bb, ctx, frame) -> RenderElement.memoryInfo(font, bb, ctx, frame));
     }
 
-    public static void startupProgressBars(SimpleFont font, final SimpleBufferBuilder buffer, final DisplayContext context, final int frameNumber) {
+    public static void startupProgressBars(SimpleFont font, final SimpleBufferBuilder buffer, final DisplayContext context,
+                                           final int frameNumber, ProgressState state) {
         ProgressMeter meter = activeMeter(StartupNotificationManager.getCurrentProgress());
         int scale = context.scale();
-        loadingIndicator(buffer, context, meter, 264);
-        String label = friendlyLabel(meter == null ? "" : meter.label().getText()).replace("Impulse: ", "");
-        int limit = 480 * scale;
+        boolean determined = meter != null && meter.steps() > 0;
+        float progress = determined ? clamp(meter.progress(), 0, 1) : 0;
+        String label = usefulLabel(meter == null ? "" : meter.label().getText());
+        state.update(progress, determined, label);
+        thinLoadingIndicator(buffer, context, progress, determined, 279, frameNumber);
+        int limit = 500 * scale;
         if (font.stringWidth(label) > limit) {
             while (!label.isEmpty() && font.stringWidth(label + "...") > limit) {
                 label = label.substring(0, label.length() - 1);
             }
             label += "...";
         }
-        renderText(font, text((context.scaledWidth() - font.stringWidth(label)) / 2, 292 * scale,
-                label, context.colourScheme().foreground().packedint(Math.min(globalAlpha, 170))), buffer, context);
+        String displayLabel = label;
+        String counter = progressText(meter, progress);
+        renderText(font, (vertices, fnt, ctx) -> {
+            int bright = ctx.colourScheme().foreground().packedint(Math.min(globalAlpha, 220));
+            int muted = ctx.colourScheme().foreground().packedint(Math.min(globalAlpha, 105));
+            fnt.generateVerticesForTexts((ctx.scaledWidth() - fnt.stringWidth(displayLabel)) / 2, 248 * scale,
+                    vertices, new SimpleFont.DisplayText(displayLabel, bright));
+            if (!counter.isEmpty()) {
+                fnt.generateVerticesForTexts((ctx.scaledWidth() - fnt.stringWidth(counter)) / 2, 294 * scale,
+                        vertices, new SimpleFont.DisplayText(counter, muted));
+            }
+            String activity = state.stalledSeconds() >= 8
+                    ? "Still working..."
+                    : playfulLabel();
+            fnt.generateVerticesForTexts((ctx.scaledWidth() - fnt.stringWidth(activity)) / 2, 316 * scale,
+                    vertices, new SimpleFont.DisplayText(activity, muted));
+        }, buffer, context);
     }
 
-    public static RenderElement mojangLoadingIndicator() {
-        return new RenderElement(() -> (bb, ctx, frame) ->
-                loadingIndicator(bb, ctx, activeMeter(StartupNotificationManager.getCurrentProgress()), 285));
+    public static RenderElement mojangLoadingIndicator(SimpleFont font, DoubleSupplier progressSupplier) {
+        return new RenderElement(() -> {
+            ProgressState state = new ProgressState();
+            return (bb, ctx, frame) -> {
+                float progress = clamp((float) progressSupplier.getAsDouble(), 0, 1);
+                state.update(progress, true, "Mojang resources");
+                thinLoadingIndicator(bb, ctx, progress, true, 300, frame);
+                String percent = Math.round(progress * 100) + "%";
+                String activity = state.stalledSeconds() >= 8
+                        ? "Still working..."
+                        : "Loading resources";
+                renderText(font, (vertices, fnt, context) -> {
+                    int bright = context.colourScheme().foreground().packedint(Math.min(globalAlpha, 190));
+                    int muted = context.colourScheme().foreground().packedint(Math.min(globalAlpha, 100));
+                    fnt.generateVerticesForTexts((context.scaledWidth() - fnt.stringWidth(percent)) / 2, 316 * context.scale(),
+                            vertices, new SimpleFont.DisplayText(percent, bright));
+                    fnt.generateVerticesForTexts((context.scaledWidth() - fnt.stringWidth(activity)) / 2, 338 * context.scale(),
+                            vertices, new SimpleFont.DisplayText(activity, muted));
+                }, bb, ctx);
+            };
+        });
     }
 
-    private static void loadingIndicator(SimpleBufferBuilder buffer, DisplayContext context, ProgressMeter meter, int logicalY) {
+    private static String progressText(ProgressMeter meter, float progress) {
+        if (meter == null || meter.steps() <= 0) return "";
+        int steps = meter.steps();
+        int completed = Math.min(steps, Math.max(0, Math.round(progress * steps)));
+        return steps == 1000 ? Math.round(progress * 100) + "%" : completed + " / " + steps;
+    }
+
+    private static void thinLoadingIndicator(SimpleBufferBuilder buffer, DisplayContext context, float progress,
+                                             boolean determined, int logicalY, int frame) {
         int scale = context.scale();
-        float centerX = context.scaledWidth() / 2f;
-        float centerY = logicalY * scale;
+        int width = 420 * scale;
+        float x0 = (context.scaledWidth() - width) / 2f;
+        float y0 = logicalY * scale;
+        float height = Math.max(2, 2 * scale);
         context.elementShader().updateRenderTypeUniform(ElementShader.RenderType.BAR);
         buffer.begin(SimpleBufferBuilder.Format.POS_TEX_COLOR, SimpleBufferBuilder.Mode.QUADS);
-        boolean determined = meter != null && meter.steps() > 0;
-        double phase = Boolean.getBoolean("impulse.reducedMotion") ? 0 : System.nanoTime() / 1_200_000_000.0;
-        arc(buffer, centerX, centerY, 10 * scale, 1.5f * scale, 0, Math.PI * 2,
-                context.colourScheme().foreground().packedint(Math.min(globalAlpha, 30)));
-        double start = determined ? -Math.PI / 2 : phase * Math.PI * 2;
-        double sweep = determined ? clamp(meter.progress(), 0, 1) * Math.PI * 2 : Math.PI * 1.35;
-        arc(buffer, centerX, centerY, 10 * scale, 1.5f * scale, start, sweep,
-                context.colourScheme().foreground().packedint(Math.min(globalAlpha, 230)));
+        int track = context.colourScheme().foreground().packedint(Math.min(globalAlpha, 35));
+        int fill = context.colourScheme().foreground().packedint(Math.min(globalAlpha, 225));
+        QuadHelper.loadQuad(buffer, x0, x0 + width, y0, y0 + height, 0, 0, 0, 0, track);
+        if (determined) {
+            QuadHelper.loadQuad(buffer, x0, x0 + width * progress, y0, y0 + height, 0, 0, 0, 0, fill);
+        } else if (!Boolean.getBoolean("impulse.reducedMotion")) {
+            float travel = width * 0.22f;
+            float position = (frame % 90) / 89f * (width + travel) - travel;
+            float left = Math.max(0, position);
+            float right = Math.min(width, position + travel);
+            if (right > left) QuadHelper.loadQuad(buffer, x0 + left, x0 + right, y0, y0 + height, 0, 0, 0, 0, fill);
+        } else {
+            QuadHelper.loadQuad(buffer, x0, x0 + width * 0.22f, y0, y0 + height, 0, 0, 0, 0, fill);
+        }
         buffer.draw();
+    }
+
+    private static final class ProgressState {
+        private float lastProgress = -1;
+        private String lastIdentity = "";
+        private long lastChangeNanos = System.nanoTime();
+
+        private void update(float progress, boolean determined, String identity) {
+            boolean changedStep = !lastIdentity.equals(identity);
+            if (changedStep || lastProgress < 0 || (determined && Math.abs(progress - lastProgress) >= 0.001f)) {
+                lastProgress = progress;
+                lastIdentity = identity;
+                lastChangeNanos = System.nanoTime();
+            }
+        }
+
+        private long stalledSeconds() {
+            return Math.max(0, (System.nanoTime() - lastChangeNanos) / 1_000_000_000L);
+        }
     }
 
     private static void arc(SimpleBufferBuilder bb, float x, float y, float radius, float thickness,
@@ -297,7 +380,7 @@ public class RenderElement {
             bar = progressBar(ctx -> new int[] { (ctx.scaledWidth() - BAR_WIDTH * ctx.scale()) / 2, y + font.lineSpacing() - font.descent(), BAR_WIDTH * ctx.scale() }, f -> colour, f -> new float[] { 0f, pm.progress() });
         }
         Renderer label = (bb, ctx, frame) -> {
-            String labelText = friendlyLabel(pm.label().getText());
+            String labelText = usefulLabel(pm.label().getText());
             int x = (ctx.scaledWidth() - font.stringWidth(labelText)) / 2;
             renderText(font, text(x, y, labelText, colour), bb, ctx);
         };

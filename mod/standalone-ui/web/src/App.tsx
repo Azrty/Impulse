@@ -349,7 +349,7 @@ export function App() {
       <header className="topbar">
         <div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong></div>
         <div className="topbar-actions">
-          <button className="secondary" disabled={!profile || busy} onClick={() => setCompatOpen(true)}><Wrench size={15} /> Game Compat</button>
+          <button className="secondary" disabled={!profile || busy} onClick={() => setCompatOpen(true)}><Wrench size={15} /> LivePatch</button>
           <button className="whats-new-button" onClick={() => setNewsOpen(true)}><Sparkles size={15} /> What’s new</button>
           <button className="icon-button" title="Report a bug" aria-label="Report a bug" onClick={() => setBugReportOpen(true)}><CircleHelp size={17} /></button>
           <button className="icon-button topbar-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Cog size={17} /></button>
@@ -415,7 +415,7 @@ export function App() {
         if (ids.length) start('gameCompatInstall', { profile_id: profile.id, ids });
         else start('gameCompatDismiss', { profile_id: profile.id, signature: snapshot.offer_signature });
       }} />}
-      {profile && state.game_compat?.recovery_available && <Confirm title="Start without Game Compat patches?" text="Minecraft did not reach its menu after a startup patch changed. Disable startup compatibility patches for this profile and try again." confirm="Disable patches" onClose={() => undefined} onConfirm={() => start('gameCompatRecovery', { profile_id: profile.id })} />}
+      {profile && state.game_compat?.recovery_available && <Confirm title="Start without LivePatch?" text="Minecraft did not reach its menu after a startup patch changed. Disable LivePatch for this profile and try again." confirm="Disable patches" onClose={() => undefined} onConfirm={() => start('gameCompatRecovery', { profile_id: profile.id })} />}
       {modManagerOpen && profile && <ModManager profile={profile} state={state} start={start} operation={operation} onClose={async () => { setModManagerOpen(false); await loadState(); }} />}
       {settingsOpen && <StandaloneSettings state={state} developerToolsOpen={developerToolsOpen} onToggleDeveloperTools={toggleDeveloperTools} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onNews={() => { setSettingsOpen(false); setNewsOpen(true); }} onReportBug={() => { setSettingsOpen(false); setBugReportOpen(true); }} />}
       {newsOpen && <NewsHistory publications={state.publications || []} currentVersion={state.impulse_version} dismissed={state.dismissed_update_ids || []} onClose={() => setNewsOpen(false)} />}
@@ -438,10 +438,10 @@ function Legal({ state, onAccepted }: { state: State; onAccepted: (state: State)
 
 function GameCompatManager({ snapshot, busy, onClose, onInstall, onToggle, onRestore }: { snapshot?: GameCompatSnapshot; busy: boolean; onClose: () => void; onInstall: (id: string) => void; onToggle: (id: string, enabled: boolean) => void; onRestore: () => void }) {
   return <div className="modal-backdrop"><div className="modal game-compat-offer" role="dialog" aria-modal="true" aria-labelledby="compat-title">
-    <button className="modal-close" onClick={onClose} aria-label="Close Game Compat"><X /></button>
-    <div className="game-compat-heading"><span><Wrench /></span><div><span className="eyebrow">Your profile</span><h2 id="compat-title">Game Compat</h2><p>Compatibility patches for your next launch.</p></div></div>
+    <button className="modal-close" onClick={onClose} aria-label="Close LivePatch"><X /></button>
+    <div className="game-compat-heading"><span><Wrench /></span><div><span className="eyebrow">Your profile</span><h2 id="compat-title">LivePatch</h2><p>Compatibility patches for your next launch.</p></div></div>
     {snapshot?.error && <div className="inline-warning"><AlertTriangle />{snapshot.error}</div>}
-    {snapshot?.recovery_disabled && <div className="inline-warning"><AlertTriangle />Game Compat is disabled for recovery. <button className="secondary" disabled={busy} onClick={onRestore}>Restore patches next launch</button></div>}
+    {snapshot?.recovery_disabled && <div className="inline-warning"><AlertTriangle />LivePatch is disabled for recovery. <button className="secondary" disabled={busy} onClick={onRestore}>Restore patches next launch</button></div>}
     <div className="game-compat-list">{snapshot?.patches.map(patch => <div className="game-compat-row compat-manager-row" key={patch.id}>
       <span className="game-compat-copy"><strong>{patch.name}</strong><small>{patch.description}</small><small>{patch.version} · {patch.status}</small></span>
       {patch.installed && <label className="compat-toggle"><input type="checkbox" disabled={busy} checked={patch.enabled} onChange={event => onToggle(patch.id, event.target.checked)} />Enabled</label>}
@@ -457,7 +457,7 @@ function GameCompatOffer({ snapshot, busy, onClose, onContinue }: { snapshot: Ga
   const toggle = (id: string) => setSelected(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id]);
   return <div className="modal-backdrop game-compat-backdrop"><div className="modal game-compat-offer">
     <button className="modal-close" disabled={busy} onClick={onClose}><X /></button>
-    <div className="game-compat-heading"><span><Wrench /></span><div><span className="eyebrow">Game Compat</span><h2>Some of your mods can work better with Impulse compatibility patches</h2><p>These optional additions improve compatibility without changing your mod files. You stay in control of what is installed.</p></div></div>
+    <div className="game-compat-heading"><span><Wrench /></span><div><span className="eyebrow">LivePatch</span><h2>Some of your mods can work better with LivePatch</h2><p>These optional patches improve compatibility without changing your mod files. You stay in control of what is installed.</p></div></div>
     <div className="game-compat-list">{available.map(patch => <label key={patch.id} className="game-compat-row">
       <input type="checkbox" checked={selected.includes(patch.id)} onChange={() => toggle(patch.id)} />
       <span className="check-box"><Check /></span>

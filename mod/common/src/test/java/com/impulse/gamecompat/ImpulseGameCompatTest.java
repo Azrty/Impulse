@@ -20,7 +20,7 @@ public final class ImpulseGameCompatTest {
             ImpulseGameCompat.resolvePatchRedirect(origin, "next.patch.jar").toString()), "same-origin redirect");
         try {
             ImpulseGameCompat.resolvePatchRedirect(origin, "https://example.com/patches/next.patch.jar");
-            throw new AssertionError("Game Compat accepted a cross-origin redirect");
+            throw new AssertionError("LivePatch accepted a cross-origin redirect");
         } catch (java.io.IOException expected) { }
         java.util.List<Integer> closed = new java.util.ArrayList<Integer>();
         PatchContext context = new PatchContext(new java.io.File("."), "test");
@@ -64,6 +64,6 @@ public final class ImpulseGameCompatTest {
     }
 
     private static void require(boolean condition, String message) {
-        if (!condition) throw new AssertionError("Game Compat failed: " + message);
+        if (!condition) throw new AssertionError("LivePatch failed: " + message);
     }
 }

@@ -1,4 +1,4 @@
-# Game Compat Patch Authoring Guide
+# LivePatch Authoring Guide
 
 Implementation reference for Impulse Standalone, reviewed September 12, 2026.
 
@@ -69,7 +69,7 @@ bytecode changes; those changes remain until Minecraft exits.
 
 1. The helper reads the profile and checks catalog applicability against local
    JAR metadata.
-2. During Play, profile preparation occurs before Game Compat's installed-patch
+2. During Play, profile preparation occurs before LivePatch's installed-patch
    update and offer checks.
 3. Accepted patches download to the profile. The helper does **not** execute their
    live entry points when changing next-launch preferences.
@@ -520,7 +520,7 @@ dependency resolution, and no explicit patch conflict graph.
 
 ## 8. Trust and integrity
 
-Game Compat uses the fixed HTTPS Presence API origin and accepts artifacts only
+LivePatch uses the fixed HTTPS Presence API origin and accepts artifacts only
 from its `/v1/game-compat/files/` endpoint. The API scans
 `presence-api/data/game-compat-files/` for `.patch.jar` files, validates each
 embedded descriptor and its required service entry, calculates the SHA-512 and
@@ -642,7 +642,7 @@ it; the loader uses installed state, not unrestricted folder discovery.
 
 ### Standalone menu
 
-The WebView's **Game Compat** menu is profile-specific. It lists catalog matches
+The WebView's **LivePatch** menu is profile-specific. It lists catalog matches
 and installed entries, permits installation/updates, and saves enabled state for
 the next launch. Those toggles must not execute patch code in the helper process.
 
@@ -658,7 +658,7 @@ Before authorized startup patches run, Impulse writes a pending-attempt marker.
 The title screen clears it. A subsequent launch may offer recovery when it finds
 that marker. This detects an interrupted startup involving a patch, **not proof**
 that the patch caused the problem. Recovery disables patches until the player
-uses **Restore patches next launch** in Game Compat. Reaching the title screen
+uses **Restore patches next launch** in LivePatch. Reaching the title screen
 does not clear recovery mode. Disable or remove a suspect patch before restoring.
 
 ## 11. Testing
@@ -709,7 +709,7 @@ Build repository checks from `Impulse/mod`:
   :common:check :standalone-ui:check :neoforge-1.21.1:build
 ```
 
-Existing Game Compat unit tests cover a small set of version-range/comparison
+Existing LivePatch unit tests cover a small set of version-range/comparison
 cases. They are not a comprehensive integrity, targeting, lifecycle, rollback,
 or resource-leak test suite. Do not label a patch production-ready solely because
 this command succeeds.

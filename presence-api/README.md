@@ -13,7 +13,7 @@ Set `CURSEFORGE_API_KEY` in `.env` to enable the optional CurseForge mod-verific
 
 The API automatically loads `presence-api/.env`. Environment variables supplied by Docker or the operating system take priority over values in that file.
 
-Game Compat needs no separate signing key or secret. The API publishes a
+LivePatch needs no separate signing key or secret. The API publishes a
 validated catalog and serves only catalog-listed patch artifacts. Standalone
 still validates each downloaded JAR's declared size and SHA-512 before loading it.
 

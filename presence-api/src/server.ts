@@ -192,22 +192,22 @@ export type GameCompatPatch = {
 
 export function sanitizeGameCompatCatalog(value: unknown): { schema_version: 1; revision: number; patches: GameCompatPatch[] } {
   const source = value as { schema_version?: unknown; revision?: unknown; patches?: unknown } | null;
-  if (source?.schema_version !== 1 || !Array.isArray(source.patches)) throw new Error('Invalid Game Compat catalog.');
+  if (source?.schema_version !== 1 || !Array.isArray(source.patches)) throw new Error('Invalid LivePatch catalog.');
   const revision = source.revision ?? 0;
-  if (!Number.isSafeInteger(revision) || Number(revision) < 0) throw new Error('Game Compat catalog revision must be a non-negative integer.');
+  if (!Number.isSafeInteger(revision) || Number(revision) < 0) throw new Error('LivePatch catalog revision must be a non-negative integer.');
   const versions = new Set<string>();
   const fileNames = new Set<string>();
   const patches = source.patches.map((raw, index) => {
     const item = raw as Record<string, unknown> | null;
     const id = boundedText(item?.id, `patches[${index}].id`, 80).toLowerCase();
     const version = boundedText(item?.version, `${id}.version`, 64);
-    if (!PATCH_ID.test(id) || !EXACT_MOD_VERSION.test(version) || versions.has(`${id}:${version}`)) throw new Error(`Invalid or duplicate Game Compat patch ${id}:${version}.`);
+    if (!PATCH_ID.test(id) || !EXACT_MOD_VERSION.test(version) || versions.has(`${id}:${version}`)) throw new Error(`Invalid or duplicate LivePatch ${id}:${version}.`);
     versions.add(`${id}:${version}`);
     const mode = item?.mode === 'startup' ? 'startup' : item?.mode === 'live' ? 'live' : null;
     if (!mode) throw new Error(`${id}.mode must be live or startup.`);
     const fileName = boundedText(item?.file_name, `${id}.file_name`, 180);
     if (!/^[A-Za-z0-9._+-]+\.patch\.jar$/u.test(fileName)) throw new Error(`${id}.file_name must end in .patch.jar.`);
-    if (fileNames.has(fileName)) throw new Error(`Game Compat patch filename is reused: ${fileName}.`);
+    if (fileNames.has(fileName)) throw new Error(`LivePatch filename is reused: ${fileName}.`);
     fileNames.add(fileName);
     const downloadUrl = new URL(boundedText(item?.download_url, `${id}.download_url`, 2048));
     if (downloadUrl.href !== `${PATCH_ORIGIN}${PATCH_FILE_ROUTE}${encodeURIComponent(fileName)}`)
@@ -559,7 +559,7 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
         }).patches[0];
         patches.push(candidate);
       } catch (error) {
-        app.log.warn({ error, fileName }, 'Ignoring invalid Game Compat patch artifact');
+        app.log.warn({ error, fileName }, 'Ignoring invalid LivePatch artifact');
       }
     }
     return sanitizeGameCompatCatalog({ schema_version: 1, revision: 1, patches });
@@ -569,7 +569,7 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     try {
       gameCompatCatalog = await discoverGameCompatCatalog();
     } catch (error) {
-      app.log.warn({ error }, 'Unable to refresh Game Compat catalog; serving last valid copy');
+      app.log.warn({ error }, 'Unable to refresh LivePatch catalog; serving last valid copy');
     }
     const body = JSON.stringify(gameCompatCatalog);
     return {
@@ -641,8 +641,8 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     try {
       registry = await currentGameCompatCatalog();
     } catch (error) {
-      app.log.error({ error }, 'Game Compat catalog is unavailable');
-      return reply.code(503).send({ error: 'Game Compat catalog is unavailable.' });
+      app.log.error({ error }, 'LivePatch catalog is unavailable');
+      return reply.code(503).send({ error: 'LivePatch catalog is unavailable.' });
     }
     reply.header('Cache-Control', 'public, max-age=900, stale-if-error=86400');
     reply.header('ETag', registry.etag);
@@ -655,8 +655,8 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     if (!/^[A-Za-z0-9._+-]+\.patch\.jar$/u.test(fileName)) return reply.code(404).send({ error: 'Patch not found.' });
     try { await currentGameCompatCatalog(); }
     catch (error) {
-      app.log.error({ error }, 'Game Compat catalog is unavailable');
-      return reply.code(503).send({ error: 'Game Compat catalog is unavailable.' });
+      app.log.error({ error }, 'LivePatch catalog is unavailable');
+      return reply.code(503).send({ error: 'LivePatch catalog is unavailable.' });
     }
     const patch = gameCompatCatalog.patches.find(item => item.file_name === fileName);
     if (!patch) return reply.code(404).send({ error: 'Patch not found.' });
@@ -665,7 +665,7 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
       const details = await stat(file);
       if (!details.isFile() || details.size !== patch.size) throw new Error('Patch artifact is missing or damaged.');
     } catch (error) {
-      app.log.error({ error, fileName }, 'Game Compat artifact is unavailable');
+      app.log.error({ error, fileName }, 'LivePatch artifact is unavailable');
       return reply.code(503).send({ error: 'Patch artifact is unavailable.' });
     }
     reply.header('Cache-Control', 'public, max-age=31536000, immutable');

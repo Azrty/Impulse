@@ -163,7 +163,7 @@ public final class ImpulseStandaloneClient121 {
                 int tabWidth = Math.min(150, Math.max(100, (this.width - 36) / 2));
                 this.addRenderableWidget(Button.builder(Component.literal("Presence"), button -> switchTab(ConfigTab.PRESENCE))
                     .bounds(this.width / 2 - tabWidth - 2, 34, tabWidth, 20).build()).active = this.tab != ConfigTab.PRESENCE;
-                this.addRenderableWidget(Button.builder(Component.literal("Game Compat"), button -> switchTab(ConfigTab.GAME_COMPAT))
+                this.addRenderableWidget(Button.builder(Component.literal("LivePatch"), button -> switchTab(ConfigTab.GAME_COMPAT))
                     .bounds(this.width / 2 + 2, 34, tabWidth, 20).build()).active = this.tab != ConfigTab.GAME_COMPAT;
                 if (this.tab == ConfigTab.GAME_COMPAT) initGameCompat(); else initPresence();
                 return;
@@ -235,7 +235,7 @@ public final class ImpulseStandaloneClient121 {
                 Button toggle = this.addRenderableWidget(Button.builder(Component.literal(fit(label, panelWidth - 8)), button -> {
                     try {
                         ImpulseGameCompat.setEnabled(gameDirectory(), profileId, patch.id, !patch.enabled);
-                        this.message = "startup".equals(patch.mode) ? "Restart required for this change." : "Game Compat updated.";
+                        this.message = "startup".equals(patch.mode) ? "Restart required for this change." : "LivePatch updated.";
                     } catch (Exception error) {
                         this.message = error.getMessage() == null ? "Could not update this patch." : error.getMessage();
                     }

@@ -566,6 +566,7 @@ public class ImpulseEarlyWindow implements ImmediateWindowProvider {
     }
 
     private Method loadingOverlay;
+    private volatile double mojangProgress;
 
     @SuppressWarnings("unchecked")
     @Override
@@ -606,7 +607,11 @@ public class ImpulseEarlyWindow implements ImmediateWindowProvider {
     public synchronized void addMojangTexture(final int textureId) {
         this.elements.clear();
         this.elements.add(RenderElement.mojang(textureId, framecount));
-        this.elements.add(RenderElement.mojangLoadingIndicator());
+        this.elements.add(RenderElement.mojangLoadingIndicator(font, () -> mojangProgress));
+    }
+
+    public void updateMojangProgress(final double progress) {
+        this.mojangProgress = Math.max(this.mojangProgress, Math.min(1d, Math.max(0d, progress)));
     }
 
     public void close() {

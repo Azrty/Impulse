@@ -977,7 +977,7 @@ public final class ImpulseStandaloneUi {
         ImpulseGameCompat.Snapshot gameCompat = ImpulseGameCompat.inspect(
             gameDirectory, prepared.id, request.minecraft_version, request.loader);
         if (gameCompat.offer_required) {
-            operation.update("Waiting for Game Compat selection", 0, 1);
+            operation.update("Waiting for LivePatch selection", 0, 1);
             Map<String, Object> offer = new LinkedHashMap<String, Object>();
             offer.put("game_compat_offer", true);
             offer.put("game_compat", gameCompat);
