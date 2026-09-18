@@ -79,10 +79,10 @@ task runStandaloneHttpTest(type: JavaExec) {
 
 check.dependsOn runStandaloneHttpTest
 
-task runGameCompatTest(type: JavaExec) {
+task runMigrationTest(type: JavaExec) {
     dependsOn testClasses
     classpath = sourceSets.test.runtimeClasspath
-    mainClass = 'com.impulse.gamecompat.ImpulseGameCompatTest'
+    mainClass = 'com.impulse.common.ImpulseMigrationTest'
 }
 
-check.dependsOn runGameCompatTest
+check.dependsOn runMigrationTest

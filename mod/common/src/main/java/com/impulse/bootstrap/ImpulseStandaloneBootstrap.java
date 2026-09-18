@@ -82,12 +82,13 @@ public final class ImpulseStandaloneBootstrap {
     private static final Pattern MOTD_PORT = Pattern.compile("\\[impulse:(\\d{1,5})]", Pattern.CASE_INSENSITIVE);
     private static final Pattern TEXT_PORT = Pattern.compile("(?:impulse[-_\\s]*(?:manifest[-_\\s]*)?|manifest[-_\\s]*)port\\s*[:=]\\s*(\\d{1,5})", Pattern.CASE_INSENSITIVE);
     private static final Pattern TOML_MOD_ID = Pattern.compile("(?m)^\\s*modId\\s*=\\s*[\"']([^\"']+)[\"']");
-    private static final String UI_BUNDLE_VERSION = "webview-6";
+    private static final String UI_BUNDLE_VERSION = "webview-7";
     private static final long UI_READY_TIMEOUT_MS = 65000L;
     private static volatile ProgressReporter progressReporter = ProgressReporter.NONE;
     private static volatile boolean skippedGlobalRestoreHookRegistered;
     private static volatile JsonObject blockedServersCache;
     private static volatile long blockedServersCacheExpiresAt;
+    private static volatile boolean connectedServicesEnabled = true;
 
     private ImpulseStandaloneBootstrap() {
     }
@@ -100,11 +101,16 @@ public final class ImpulseStandaloneBootstrap {
         progressReporter = reporter == null ? ProgressReporter.NONE : reporter;
     }
 
-    public static UiOutcome configureWithNativeUi(final File gameDirectory, final String minecraftVersion, final String loader, final String loaderVersion) {
-        return configureWithNativeUi(gameDirectory, minecraftVersion, loader, loaderVersion, "");
+    public static void setConnectedServicesEnabled(boolean enabled) {
+        connectedServicesEnabled = enabled;
+        if (!enabled) {
+            blockedServersCache = null;
+            blockedServersCacheExpiresAt = 0L;
+        }
     }
 
-    public static UiOutcome configureWithNativeUi(final File gameDirectory, final String minecraftVersion, final String loader, final String loaderVersion, final String username) {
+    public static UiOutcome configureWithNativeUi(final File gameDirectory, final String minecraftVersion, final String loader, final String loaderVersion) {
+        connectedServicesEnabled = ImpulseStandaloneMode.connectedServicesEnabled(gameDirectory);
         progressReporter.begin("Impulse: waiting for profile selection", 1);
         Process process = null;
         File sessionDirectory = null;
@@ -125,7 +131,6 @@ public final class ImpulseStandaloneBootstrap {
             request.assets_directory = bundle.assetsDirectory.getAbsolutePath();
             request.parent_pid = currentProcessId();
             request.impulse_version = currentImpulseVersion();
-            request.username = clean(username, "");
             request.launch_log_path = StandaloneLaunchLog.currentLogPath();
             request.launch_directory = StandaloneLaunchLog.currentLaunchDirectory();
             request.launch_started_at = StandaloneLaunchLog.currentStartedAt();
@@ -422,6 +427,7 @@ public final class ImpulseStandaloneBootstrap {
 
     public static BootstrapResult bootstrap(File gameDirectory, String minecraftVersion, String loader, String loaderVersion) throws Exception {
         if (isLauncherLaunch()) return BootstrapResult.inactive();
+        connectedServicesEnabled = ImpulseStandaloneMode.connectedServicesEnabled(gameDirectory);
         File root = standaloneRoot(gameDirectory);
         Store store = loadStore(gameDirectory);
         Profile profile = activeProfile(store);
@@ -483,8 +489,10 @@ public final class ImpulseStandaloneBootstrap {
     private static Discovery discover(String input, String expectedPublicKey, boolean verifyMods) throws IOException {
         Address address = parseAddress(input);
         StandaloneLaunchLog.info("server", "Starting server discovery", StandaloneLaunchLog.fields("host", address.host, "minecraft_port", address.port));
-        assertServerAllowed(address.host);
-        if (!address.connectHost.equalsIgnoreCase(address.host)) assertServerAllowed(address.connectHost);
+        if (connectedServicesEnabled) {
+            assertServerAllowed(address.host);
+            if (!address.connectHost.equalsIgnoreCase(address.host)) assertServerAllowed(address.connectHost);
+        }
         JsonObject status = null;
         IOException pingError = null;
         try {
@@ -535,7 +543,7 @@ public final class ImpulseStandaloneBootstrap {
         }
         normalizeManifest(manifest);
         StandaloneLaunchLog.info("manifest", "Manifest parsed", StandaloneLaunchLog.fields("required_mods", safeMods(manifest).size(), "optional_mods", safeOptionalMods(manifest).size()));
-        if (verifyMods) verifyManifestModOrigins(manifest);
+        if (verifyMods && connectedServicesEnabled) verifyManifestModOrigins(manifest);
         if (manifest.minecraft == null || clean(manifest.minecraft.version, "").length() == 0) {
             throw new IOException("The Impulse manifest does not contain a Minecraft version.");
         }
@@ -672,9 +680,16 @@ public final class ImpulseStandaloneBootstrap {
         syncMods(gameDirectory, managedMods, discovery, effective);
         checkCancelled();
         // Re-run catalog matching after the exact downloaded files have passed SHA-512 validation.
-        verifyManifestModOrigins(discovery.manifest);
-        checkCancelled();
-        finalizeManifestModOrigins(gameDirectory, discovery.manifest, effective, managedMods);
+        if (connectedServicesEnabled) {
+            verifyManifestModOrigins(discovery.manifest);
+            checkCancelled();
+            finalizeManifestModOrigins(gameDirectory, discovery.manifest, effective, managedMods);
+        } else {
+            for (ManifestMod mod : effective) {
+                mod.verification = new Verification();
+                mod.verification.status = "Local integrity only";
+            }
+        }
         checkCancelled();
         progressReporter.message("Saving verified profile");
         writeTextAtomic(new File(profileRoot, "manifest.json"), GSON.toJson(discovery.manifest));
@@ -1027,6 +1042,7 @@ public final class ImpulseStandaloneBootstrap {
             String status = mod.verification == null ? "Verification unavailable" : clean(mod.verification.status, "Verification unavailable");
             if (!"Matched on Modrinth".equals(status) && !"Matched on CurseForge".equals(status)
                 && !"Recognized by Impulse".equals(status) && !"User provided".equals(status)
+                && !"Local integrity only".equals(status)
                 && !"Pending CurseForge verification".equals(status)) out.add(mod);
         }
         return out;
@@ -2042,7 +2058,6 @@ public final class ImpulseStandaloneBootstrap {
         public String assets_directory;
         public long parent_pid;
         public String impulse_version;
-        public String username;
         public String launch_log_path;
         public String launch_directory;
         public long launch_started_at;

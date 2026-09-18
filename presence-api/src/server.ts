@@ -52,11 +52,25 @@ export type PresenceServerOptions = {
   bugReportRetentionDays?: number;
   bugReportMaxStorageBytes?: number;
   launcherAvailabilityFile?: string;
-  crashWheelFile?: string;
+  standaloneMigrationFile?: string;
   gameCompatFilesDirectory?: string;
 };
 
 type LauncherAvailability = { schema_version: 1; isLauncherAvailable: boolean };
+export type StandaloneMigration = { schema_version: 1; migrate: boolean; migration_date: string; revision: number };
+
+export function sanitizeStandaloneMigration(value: unknown): StandaloneMigration {
+  if (!value || typeof value !== 'object') throw new Error('Invalid standalone migration registry.');
+  const candidate = value as Record<string, unknown>;
+  const date = typeof candidate.migration_date === 'string' ? candidate.migration_date : '';
+  const parsed = /^\d{4}-\d{2}-\d{2}$/u.test(date) ? new Date(`${date}T00:00:00Z`) : new Date(Number.NaN);
+  if (candidate.schema_version !== 1 || typeof candidate.migrate !== 'boolean'
+      || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date
+      || !Number.isSafeInteger(candidate.revision) || Number(candidate.revision) < 1) {
+    throw new Error('Standalone migration must contain schema_version 1, migrate, migration_date and a positive revision.');
+  }
+  return { schema_version: 1, migrate: candidate.migrate, migration_date: date, revision: Number(candidate.revision) };
+}
 
 export function sanitizeLauncherAvailability(value: unknown): LauncherAvailability {
   if (!value || typeof value !== 'object') throw new Error('Invalid launcher availability registry.');
@@ -585,24 +599,13 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
   } catch (error) {
     app.log.warn({ error }, 'Unable to read launcher availability registry; defaulting to unavailable');
   }
-  const crashWheelPath = path.resolve(options.crashWheelFile
-    ?? path.join(process.cwd(), 'data', 'crash-wheel.json'));
-
-  async function crashWheelEligible(username: string): Promise<boolean> {
-    try {
-      const registry = JSON.parse(await readFile(crashWheelPath, 'utf8')) as { schema_version?: unknown; active_until?: unknown; usernames?: unknown };
-      if (registry.schema_version !== 1 || !Array.isArray(registry.usernames)) throw new Error('Invalid Crash Wheel registry.');
-      if (registry.active_until !== undefined) {
-        const activeUntil = typeof registry.active_until === 'string' ? Date.parse(registry.active_until) : Number.NaN;
-        if (!Number.isFinite(activeUntil)) throw new Error('Invalid Crash Wheel expiration.');
-        if (now() >= activeUntil) return false;
-      }
-      const target = username.toLowerCase();
-      return registry.usernames.some(value => typeof value === 'string' && value.toLowerCase() === target);
-    } catch (error) {
-      app.log.warn({ error }, 'Unable to read Crash Wheel registry; allowing launch');
-      return false;
-    }
+  const standaloneMigrationPath = path.resolve(options.standaloneMigrationFile
+    ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data/standalone-migration.json'));
+  let standaloneMigration: StandaloneMigration = { schema_version: 1, migrate: false, migration_date: '2026-09-19', revision: 1 };
+  try {
+    standaloneMigration = sanitizeStandaloneMigration(JSON.parse(await readFile(standaloneMigrationPath, 'utf8')));
+  } catch (error) {
+    app.log.warn({ error }, 'Unable to read standalone migration registry; defaulting to closed');
   }
   async function currentLauncherAvailability(): Promise<LauncherAvailability> {
     try {
@@ -611,6 +614,14 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
       app.log.warn({ error }, 'Unable to refresh launcher availability; serving last valid copy');
     }
     return launcherAvailability;
+  }
+  async function currentStandaloneMigration(): Promise<StandaloneMigration> {
+    try {
+      standaloneMigration = sanitizeStandaloneMigration(JSON.parse(await readFile(standaloneMigrationPath, 'utf8')));
+    } catch (error) {
+      app.log.warn({ error }, 'Unable to refresh standalone migration registry; serving last valid copy');
+    }
+    return standaloneMigration;
   }
 
   app.get('/v1/mod-verification/recognized-mods', async (request, reply) => {
@@ -682,15 +693,14 @@ export async function createPresenceServer(options: PresenceServerOptions): Prom
     return { isLauncherAvailable: availability.isLauncherAvailable };
   });
 
-  app.post('/v1/standalone/crash-wheel', {
-    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
-  }, async (request, reply) => {
-    reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
-    reply.header('Pragma', 'no-cache');
-    const body = request.body as Record<string, unknown> | null;
-    const username = cleanReportText(body?.username, 16);
-    if (!/^[A-Za-z0-9_]{3,16}$/u.test(username)) return reply.code(400).send({ error: 'Invalid Minecraft username.' });
-    return { eligible: await crashWheelEligible(username) };
+  app.get('/v1/standalone/migration', async (request, reply) => {
+    const migration = await currentStandaloneMigration();
+    const body = JSON.stringify(migration);
+    const etag = `"${crypto.createHash('sha256').update(body).digest('hex')}"`;
+    reply.header('Cache-Control', 'no-store');
+    reply.header('ETag', etag);
+    if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+    return reply.type('application/json; charset=utf-8').send(body);
   });
 
   // Older Impulse clients sent bodyless POST requests through HttpURLConnection,

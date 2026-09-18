@@ -41,6 +41,10 @@ public final class ImpulseModUpdater {
 
     public static void checkAsync(final File gameDirectory, final String currentVersion, final String minecraftVersion, final String loader) {
         if (Boolean.parseBoolean(System.getProperty("impulse.client", "false"))) return;
+        if (ImpulseStandaloneMode.isLegacy(gameDirectory)) {
+            System.out.println("[Impulse Updater] Automatic updates are disabled for legacy Impulse.");
+            return;
+        }
         if (!STARTED.compareAndSet(false, true)) return;
         final File root = gameDirectory == null ? new File(".") : gameDirectory;
         final Properties settings = readSettings(root);
@@ -59,6 +63,11 @@ public final class ImpulseModUpdater {
         }, "impulse-mod-updater");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    public static void checkManually(File gameDirectory, String currentVersion, String minecraftVersion, String loader) throws Exception {
+        File root = gameDirectory == null ? new File(".") : gameDirectory;
+        check(root, clean(currentVersion), clean(minecraftVersion), cleanLoader(loader), readSettings(root));
     }
 
     static void check(File root, String currentVersion, String minecraftVersion, String loader, Properties settings) throws Exception {
@@ -239,7 +248,7 @@ public final class ImpulseModUpdater {
         return value.matches("[0-9]+") ? value : "0";
     }
 
-    static File locateInstalledJar(File root) throws Exception {
+    public static File locateInstalledJar(File root) throws Exception {
         File mods = new File(root, "mods").getCanonicalFile();
         if (!mods.isDirectory()) return null;
         File canonical = new File(mods, "impulse.jar");
@@ -276,7 +285,7 @@ public final class ImpulseModUpdater {
         return removed;
     }
 
-    static boolean isImpulseJar(File file) {
+    public static boolean isImpulseJar(File file) {
         if (file == null || !file.isFile()) return false;
         JarFile jar = null;
         try {

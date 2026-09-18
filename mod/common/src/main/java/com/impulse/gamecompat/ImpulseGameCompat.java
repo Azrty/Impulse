@@ -6,6 +6,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.impulse.bootstrap.StandaloneLaunchLog;
+import com.impulse.common.ImpulseStandaloneMode;
 import com.electronwill.nightconfig.core.CommentedConfig;
 import com.electronwill.nightconfig.toml.TomlParser;
 
@@ -59,6 +60,14 @@ public final class ImpulseGameCompat {
 
     private ImpulseGameCompat() { }
 
+    public static synchronized void clearRemoteCache(File gameDirectory) {
+        memoryCatalog = null;
+        memoryCatalogAt = 0L;
+        memoryCatalogExpiresAt = 0L;
+        try { Files.deleteIfExists(catalogCache(gameDirectory).toPath()); }
+        catch (IOException error) { StandaloneLaunchLog.error("game-compat", "Could not remove the cached LivePatch catalog", error); }
+    }
+
     public static Snapshot inspect(File gameDirectory, String profileId, String minecraftVersion, String loader) {
         return inspect(gameDirectory, profileId, minecraftVersion, loader, true);
     }
@@ -68,6 +77,13 @@ public final class ImpulseGameCompat {
     }
 
     private static Snapshot inspect(File gameDirectory, String profileId, String minecraftVersion, String loader, boolean refresh) {
+        if (!ImpulseStandaloneMode.connectedServicesEnabled(gameDirectory)) {
+            Snapshot disabled = new Snapshot();
+            disabled.patches = Collections.emptyList();
+            disabled.catalog_available = false;
+            disabled.error = "LivePatch is unavailable in legacy Impulse.";
+            return disabled;
+        }
         State state = loadState(gameDirectory, profileId);
         Catalog catalog;
         String error = null;
@@ -121,6 +137,7 @@ public final class ImpulseGameCompat {
 
     public static Snapshot install(File gameDirectory, String profileId, String minecraftVersion, String loader,
                                    List<String> selectedIds, Progress progress) throws IOException {
+        if (!ImpulseStandaloneMode.connectedServicesEnabled(gameDirectory)) throw new IOException("LivePatch is unavailable in legacy Impulse.");
         Catalog catalog = loadCatalog(gameDirectory);
         Map<String, String> mods = scanInstalledMods(gameDirectory, profileId);
         Map<String, Patch> available = new HashMap<String, Patch>();
@@ -200,6 +217,7 @@ public final class ImpulseGameCompat {
     }
 
     public static void dismissOffer(File gameDirectory, String profileId, String signature) throws IOException {
+        if (!ImpulseStandaloneMode.connectedServicesEnabled(gameDirectory)) throw new IOException("LivePatch is unavailable in legacy Impulse.");
         State state = loadState(gameDirectory, profileId);
         state.dismissed_offer_signature = signature == null ? "" : signature;
         saveState(gameDirectory, profileId, state);
@@ -214,6 +232,7 @@ public final class ImpulseGameCompat {
     }
 
     public static void updateInstalled(File gameDirectory, String profileId, String minecraftVersion, String loader, Progress progress) {
+        if (!ImpulseStandaloneMode.connectedServicesEnabled(gameDirectory)) return;
         State before = loadState(gameDirectory, profileId);
         Snapshot snapshot = inspect(gameDirectory, profileId, minecraftVersion, loader);
         List<String> updates = new ArrayList<String>();
@@ -238,6 +257,7 @@ public final class ImpulseGameCompat {
     }
 
     private static PatchView setEnabled(File gameDirectory, String profileId, String id, boolean enabled, boolean inGame) throws Exception {
+        if (!ImpulseStandaloneMode.connectedServicesEnabled(gameDirectory)) throw new IOException("LivePatch is unavailable in legacy Impulse.");
         State state = loadState(gameDirectory, profileId);
         Installed installed = state.patches.get(id);
         if (installed == null) throw new IOException("LivePatch is not installed.");
@@ -257,6 +277,7 @@ public final class ImpulseGameCompat {
     }
 
     public static void activateLivePatches(File gameDirectory, String profileId, ClassLoader loader) {
+        if (!ImpulseStandaloneMode.connectedServicesEnabled(gameDirectory)) return;
         gameClassLoader = loader;
         if (!shutdownHookRegistered) {
             synchronized (ImpulseGameCompat.class) {
@@ -275,6 +296,7 @@ public final class ImpulseGameCompat {
     }
 
     public static List<File> enabledStartupPatches(File gameDirectory, String profileId) {
+        if (!ImpulseStandaloneMode.connectedServicesEnabled(gameDirectory)) return Collections.emptyList();
         State state = loadState(gameDirectory, profileId);
         if (state.recovery_disabled) return Collections.emptyList();
         List<File> files = new ArrayList<File>();

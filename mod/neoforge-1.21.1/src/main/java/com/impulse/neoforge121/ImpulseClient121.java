@@ -42,7 +42,6 @@ public final class ImpulseClient121 {
 
     public static void register() {
         NeoForge.EVENT_BUS.register(new ImpulseClient121());
-        NeoForge.EVENT_BUS.register(new ImpulseBadgeClient121());
     }
 
     @SubscribeEvent

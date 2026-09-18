@@ -8,7 +8,7 @@ COPY data ./data
 RUN npm run build
 
 FROM node:22-alpine AS runtime
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=8080 REPORTS_DIRECTORY=/reports BUG_REPORTS_DIRECTORY=/reports/bugs BUG_REPORT_RETENTION_DAYS=90 BUG_REPORT_MAX_STORAGE_BYTES=21474836480 IMPULSE_CRASH_WHEEL_FILE=/reports/crash-wheel.json
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=8080 REPORTS_DIRECTORY=/reports BUG_REPORTS_DIRECTORY=/reports/bugs BUG_REPORT_RETENTION_DAYS=90 BUG_REPORT_MAX_STORAGE_BYTES=21474836480
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
@@ -16,7 +16,7 @@ COPY --from=build /app/dist/src ./dist
 COPY data ./data
 COPY scripts ./scripts
 USER root
-RUN mkdir -p /reports && cp /app/data/crash-wheel.json /reports/crash-wheel.json && chown -R node:node /reports
+RUN mkdir -p /reports && chown -R node:node /reports
 USER node
 VOLUME ["/reports"]
 EXPOSE 8080

@@ -9,7 +9,9 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.impulse.bootstrap.ImpulseStandaloneBootstrap;
 import com.impulse.bootstrap.StandaloneLaunchLog;
-import com.impulse.gamecompat.ImpulseGameCompat;
+import com.impulse.bootstrap.ImpulseMigrationInstaller;
+import com.impulse.bootstrap.ImpulseModUpdater;
+import com.impulse.bootstrap.ImpulseStandaloneMode;
 import dev.webview.Webview;
 import com.sun.jna.Library;
 import com.sun.jna.Native;
@@ -31,7 +33,6 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
-import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -47,7 +48,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 
 /** WebView standalone profile selector launched before NeoForge mod discovery. */
@@ -60,16 +60,14 @@ public final class ImpulseStandaloneUi {
     private static final int MAX_IMAGE_BYTES = 6 * 1024 * 1024;
     private static final int MAX_FRONTEND_BYTES = 8 * 1024 * 1024;
     private static final long FRONTEND_READY_TIMEOUT_MS = 60000L;
+    // Retained for compatibility with old local report/update data; neither service is exposed by this build.
     private static final int MAX_UPDATES_BYTES = 1024 * 1024;
     private static final long IMAGE_CACHE_MAX_BYTES = 100L * 1024L * 1024L;
     private static final long IMAGE_CACHE_MAX_AGE = 30L * 24L * 60L * 60L * 1000L;
     private static final String UPDATES_URL = "https://api.impulsemc.com/v1/standalone/updates";
+    private static final String MIGRATION_URL = "https://api.impulsemc.com/v1/standalone/migration";
     private static final int MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
     private static final long MAX_CRASH_AGE_MS = 48L * 60L * 60L * 1000L;
-    private static final long CRASH_WHEEL_DURATION_MS = 10000L;
-    private static final long CRASH_WHEEL_START_DELAY_MS = 2000L;
-    private static final long CRASH_WHEEL_MERCY_DURATION_MS = 3000L;
-    private static final int CRASH_WHEEL_MAX_LOSSES = 3;
     private static final Set<String> UPDATE_ICONS = Set.of("sparkles", "shield-check", "package-plus", "scan-check", "wrench", "rocket", "server", "download");
 
     private final ImpulseStandaloneBootstrap.UiRequest request;
@@ -95,18 +93,10 @@ public final class ImpulseStandaloneUi {
     private volatile boolean frontendReady;
     private volatile boolean developerToolsActive;
     private volatile ImpulseStandaloneBootstrap.RestrictedServerException currentRestriction;
-    private volatile UpdateRegistry updateRegistry;
-    private final SecureRandom crashWheelRandom = new SecureRandom();
-    private volatile FutureTask<Boolean> crashWheelParticipation;
-    private volatile boolean crashWheelChecked;
-    private volatile boolean crashWheelPlayChecked;
-    private volatile boolean crashWheelRequired;
-    private volatile boolean crashWheelPassed;
-    private volatile boolean crashWheelCrash;
-    private volatile boolean crashWheelMercy;
-    private volatile boolean crashWheelResolved;
-    private volatile int crashWheelSector = -1;
-    private volatile long crashWheelStartedAt;
+    // Kept only to read older local settings without starting the retired update-notes service.
+    private volatile UpdateRegistry updateRegistry = new UpdateRegistry();
+    private volatile MigrationCampaign migrationCampaign;
+    private volatile ImpulseMigrationInstaller.Prepared preparedMigration;
 
     private ImpulseStandaloneUi(ImpulseStandaloneBootstrap.UiRequest request) {
         this.request = request;
@@ -119,7 +109,9 @@ public final class ImpulseStandaloneUi {
             StandaloneLaunchLog.attachFromSystemProperties(gameDirectory);
         }
         this.legalAccepted = loadLegalAcceptance();
-        this.updateRegistry = loadCachedUpdates();
+        ImpulseStandaloneBootstrap.setConnectedServicesEnabled(!legacyMode());
+        this.migrationCampaign = loadCachedMigration();
+        refreshMigration();
         ImpulseStandaloneBootstrap.Store store = ImpulseStandaloneBootstrap.loadStore(gameDirectory);
         this.selectedProfileId = store.active_profile_id;
         if (selectedProfileId == null && store.profiles != null && !store.profiles.isEmpty()) {
@@ -277,13 +269,6 @@ public final class ImpulseStandaloneUi {
             return Collections.singletonMap("time", System.currentTimeMillis());
         }
         if ("state".equals(action)) return state();
-        if ("bugReportInfo".equals(action)) return bugReportInfo();
-        if ("pickScreenshots".equals(action)) return pickScreenshots();
-        if ("crashWheelParticipation".equals(action)) {
-            return crashWheelParticipationStatus();
-        }
-        if ("crashWheel".equals(action)) return crashWheel();
-        if ("completeCrashWheel".equals(action)) return completeCrashWheel();
         if ("selectProfile".equals(action)) {
             currentRestriction = null;
             selectedProfileId = required(command, "profile_id");
@@ -310,13 +295,21 @@ public final class ImpulseStandaloneUi {
             setOnboardingVersion(0);
             return state();
         }
-        if ("dismissUpdate".equals(action)) {
-            dismissUpdate(required(command, "id"));
+        if ("ackMigrationAnnouncement".equals(action)) {
+            acknowledgeMigrationAnnouncement();
             return state();
         }
-        if ("refreshUpdates".equals(action)) {
-            refreshUpdates();
+        if ("stayOnImpulse".equals(action)) {
+            chooseLegacyImpulse();
             return state();
+        }
+        if ("refreshMigration".equals(action)) {
+            refreshMigration();
+            return state();
+        }
+        if ("finishMigration".equals(action)) {
+            finishMigration();
+            return true;
         }
         if ("acceptLegal".equals(action)) {
             saveLegalAcceptance();
@@ -381,165 +374,26 @@ public final class ImpulseStandaloneUi {
         state.put("developer_tools_active", developerToolsActive);
         state.put("impulse_version", clean(request.impulse_version, "unknown"));
         state.put("onboarding_completed", loadOnboardingVersion() >= 1);
-        state.put("dismissed_update_ids", dismissedUpdateIds());
-        state.put("publications", updateRegistry == null ? Collections.emptyList() : updateRegistry.publications);
+        state.put("migration", migrationState());
+        state.put("legacy_mode", legacyMode());
         state.put("minecraft_version", request.minecraft_version);
         state.put("loader", request.loader);
         if (currentRestriction != null) state.put("restriction", restrictionMap(currentRestriction));
         if (selected != null) {
             state.put("custom_mods", ImpulseStandaloneBootstrap.loadCustomModState(gameDirectory, selected.id).mods);
-            state.put("game_compat", ImpulseGameCompat.inspect(
-                gameDirectory, selected.id, request.minecraft_version, request.loader));
-            try {
-                ImpulseStandaloneBootstrap.RestrictedServerException restriction = ImpulseStandaloneBootstrap.serverRestriction(selected.address);
-                if (restriction != null) {
-                    currentRestriction = restriction;
-                    state.put("restriction", restrictionMap(restriction));
+            if (!legacyMode()) {
+                try {
+                    ImpulseStandaloneBootstrap.RestrictedServerException restriction = ImpulseStandaloneBootstrap.serverRestriction(selected.address);
+                    if (restriction != null) {
+                        currentRestriction = restriction;
+                        state.put("restriction", restrictionMap(restriction));
+                    }
+                } catch (Exception error) {
+                    System.err.println("[Impulse UI] Restriction check failed: " + error.getMessage());
                 }
-            } catch (Exception error) {
-                System.err.println("[Impulse UI] Restriction check failed: " + error.getMessage());
             }
         }
         return state;
-    }
-
-    private synchronized boolean crashWheelParticipant() {
-        if (!crashWheelChecked) {
-            crashWheelChecked = true;
-            // Local state must never activate the prank by itself. A fresh, explicit
-            // positive response from the API is required for this helper session.
-            boolean eligible = crashWheelEligible();
-            crashWheelMercy = eligible && crashWheelLosses() >= CRASH_WHEEL_MAX_LOSSES;
-            crashWheelRequired = eligible;
-            crashWheelPassed = !eligible;
-        }
-        return crashWheelRequired;
-    }
-
-    private synchronized Map<String, Object> crashWheelParticipationStatus() throws Exception {
-        if (crashWheelParticipation == null) {
-            crashWheelParticipation = new FutureTask<Boolean>(this::crashWheelEligible);
-            images.execute(crashWheelParticipation);
-            return Collections.singletonMap("pending", true);
-        }
-        if (!crashWheelParticipation.isDone()) return Collections.singletonMap("pending", true);
-        boolean participating = crashWheelParticipation.get();
-        crashWheelParticipation = null;
-        return Map.of("pending", false, "participating", participating);
-    }
-
-    private synchronized Map<String, Object> crashWheel() {
-        // Revalidate on Play instead of trusting the earlier cursor check. This is
-        // deliberately uncached so removals from the API take effect immediately.
-        if (!crashWheelPlayChecked) {
-            boolean eligible = crashWheelEligible();
-            crashWheelPlayChecked = true;
-            crashWheelChecked = true;
-            crashWheelRequired = eligible;
-            crashWheelPassed = !eligible;
-            crashWheelMercy = eligible && crashWheelLosses() >= CRASH_WHEEL_MAX_LOSSES;
-        }
-        if (crashWheelRequired && crashWheelSector < 0) {
-            crashWheelSector = crashWheelRandom.nextInt(5);
-            crashWheelCrash = !crashWheelMercy && (crashWheelSector == 0 || crashWheelSector == 2 || crashWheelSector == 4);
-            crashWheelStartedAt = System.currentTimeMillis();
-            System.out.println("[Impulse UI] Crash Wheel started for an eligible participant; sector=" + crashWheelSector + ".");
-        }
-        Map<String, Object> result = new LinkedHashMap<String, Object>();
-        result.put("required", crashWheelRequired);
-        result.put("sector", crashWheelSector);
-        result.put("crash", crashWheelCrash);
-        result.put("duration_ms", crashWheelDuration());
-        result.put("start_delay_ms", CRASH_WHEEL_START_DELAY_MS);
-        result.put("mercy", crashWheelMercy);
-        result.put("passed", crashWheelPassed);
-        return result;
-    }
-
-    private long crashWheelDuration() {
-        return crashWheelMercy ? CRASH_WHEEL_MERCY_DURATION_MS : CRASH_WHEEL_DURATION_MS;
-    }
-
-    private int crashWheelLosses() {
-        try {
-            JsonObject settings = loadStandaloneSettings();
-            return settings.has("crash_wheel_losses")
-                ? Math.max(0, Math.min(CRASH_WHEEL_MAX_LOSSES, settings.get("crash_wheel_losses").getAsInt())) : 0;
-        } catch (RuntimeException ignored) { return 0; }
-    }
-
-    private boolean crashWheelEligible() {
-        String username = clean(request.username, "");
-        if (!username.matches("[A-Za-z0-9_]{3,16}")) return false;
-        HttpURLConnection connection = null;
-        try {
-            String apiBase = System.getProperty("impulse.presence.api", "https://api.impulsemc.com").replaceAll("/+$", "");
-            // A unique request URL prevents an intermediary from replaying an older
-            // positive eligibility decision after a participant is removed.
-            URL endpoint = new URL(apiBase + "/v1/standalone/crash-wheel?request=" + UUID.randomUUID());
-            connection = (HttpURLConnection) endpoint.openConnection();
-            connection.setRequestMethod("POST");
-            connection.setConnectTimeout(5000);
-            connection.setReadTimeout(5000);
-            connection.setUseCaches(false);
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            connection.setRequestProperty("Accept", "application/json");
-            connection.setRequestProperty("Cache-Control", "no-cache, no-store");
-            connection.setRequestProperty("User-Agent", "Impulse-Standalone/" + clean(request.impulse_version, "unknown"));
-            JsonObject body = new JsonObject();
-            body.addProperty("username", username);
-            byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-            connection.setFixedLengthStreamingMode(bytes.length);
-            try (OutputStream output = connection.getOutputStream()) { output.write(bytes); }
-            int status = connection.getResponseCode();
-            if (status != 200) {
-                System.err.println("[Impulse UI] Crash Wheel eligibility rejected with HTTP " + status + ".");
-                return false;
-            }
-            try (InputStream input = connection.getInputStream()) {
-                JsonObject response = new JsonParser().parse(new String(readLimited(input, 16 * 1024), StandardCharsets.UTF_8)).getAsJsonObject();
-                return response.has("eligible") && response.get("eligible").isJsonPrimitive()
-                    && response.getAsJsonPrimitive("eligible").isBoolean()
-                    && response.get("eligible").getAsBoolean();
-            }
-        } catch (Exception error) {
-            System.err.println("[Impulse UI] Crash Wheel eligibility check unavailable: " + error.getMessage());
-            return false;
-        } finally {
-            if (connection != null) connection.disconnect();
-        }
-    }
-
-    private synchronized Map<String, Object> completeCrashWheel() throws IOException {
-        if (!crashWheelRequired || crashWheelSector < 0) throw new IOException("No Crash Wheel round is active.");
-        long remaining = CRASH_WHEEL_START_DELAY_MS + crashWheelDuration() - (System.currentTimeMillis() - crashWheelStartedAt);
-        if (remaining > 0L) throw new IOException("The Crash Wheel is still spinning.");
-        Map<String, Object> result = new LinkedHashMap<String, Object>();
-        result.put("crash", crashWheelCrash);
-        result.put("closed", crashWheelCrash);
-        if (crashWheelResolved) return result;
-        if (crashWheelCrash) {
-            // Persist before exiting, and resolve once so duplicate bridge calls cannot count twice.
-            JsonObject settings = loadStandaloneSettings();
-            settings.addProperty("crash_wheel_losses", Math.min(CRASH_WHEEL_MAX_LOSSES, crashWheelLosses() + 1));
-            writeJsonAtomic(standaloneSettingsFile(), settings);
-            crashWheelResolved = true;
-            writeResult("quit", null, null);
-            completed = true;
-            result.put("closed", true);
-            Thread closer = new Thread(() -> {
-                try { Thread.sleep(250L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                closeWindow();
-            }, "impulse-crash-wheel-close");
-            closer.setDaemon(true);
-            closer.start();
-        } else {
-            crashWheelResolved = true;
-            crashWheelPassed = true;
-            result.put("closed", false);
-        }
-        return result;
     }
 
     private String startOperation(String kind, JsonObject command) throws IOException {
@@ -573,8 +427,6 @@ public final class ImpulseStandaloneUi {
                 case "add" -> addServer(operation, required(command, "address"));
                 case "refresh" -> refresh(operation, required(command, "profile_id"));
                 case "delete" -> delete(operation, required(command, "profile_id"));
-                case "report" -> reportServer(operation, command);
-                case "reportBug" -> reportBug(operation, command);
                 case "optional" -> updateOptional(operation, required(command, "profile_id"), strings(command, "ids"));
                 case "play" -> play(operation, required(command, "profile_id"), bool(command, "accept_unverified"));
                 case "searchMods" -> searchMods(operation, command);
@@ -586,15 +438,8 @@ public final class ImpulseStandaloneUi {
                 case "repairMod" -> repairMod(operation, command);
                 case "checkUpdates" -> checkUpdates(operation, command);
                 case "globalMods" -> globalMods(operation, command);
-                case "gameCompatInstall" -> gameCompatInstall(operation, command);
-                case "gameCompatToggle" -> {
-                    ImpulseGameCompat.setEnabledForNextLaunch(gameDirectory, required(command, "profile_id"),
-                        required(command, "id"), command.get("enabled").getAsBoolean());
-                    operation.result = state();
-                }
-                case "gameCompatDismiss" -> gameCompatDismiss(operation, command);
-                case "gameCompatRecovery" -> gameCompatRecovery(operation, command);
-                case "gameCompatRestore" -> gameCompatRestore(operation, command);
+                case "migrate" -> prepareMigration(operation);
+                case "emergencyUpdate" -> emergencyUpdate(operation);
                 default -> throw new IOException("Unsupported operation: " + operation.kind);
             }
             operation.done(operation.result);
@@ -665,6 +510,7 @@ public final class ImpulseStandaloneUi {
     }
 
     private void reportServer(Operation operation, JsonObject command) throws Exception {
+        requireConnectedServices("Server reports");
         ImpulseStandaloneBootstrap.Profile profile = requireProfile(required(command, "profile_id"));
         String category = required(command, "category");
         String details = required(command, "details").trim();
@@ -793,6 +639,7 @@ public final class ImpulseStandaloneUi {
     }
 
     private void reportBug(Operation operation, JsonObject command) throws Exception {
+        requireConnectedServices("Bug reports");
         String description = required(command, "description").trim();
         if (description.length() < 20 || description.length() > 10000) throw new IOException("The description must contain between 20 and 10,000 characters.");
         boolean includeDiagnostics = bool(command, "include_diagnostics");
@@ -959,13 +806,13 @@ public final class ImpulseStandaloneUi {
     }
 
     private void play(Operation operation, String profileId, boolean acceptUnverified) throws Exception {
-        if (!crashWheelPlayChecked) crashWheel();
-        if (crashWheelRequired && !crashWheelPassed) throw new IOException("Complete the Crash Wheel before launching.");
         ensureLaunchActive(operation);
         currentRestriction = null;
         ImpulseStandaloneBootstrap.Profile profile = requireProfile(profileId);
-        ImpulseStandaloneBootstrap.RestrictedServerException restriction = ImpulseStandaloneBootstrap.serverRestriction(profile.address);
-        if (restriction != null) throw restriction;
+        if (!legacyMode()) {
+            ImpulseStandaloneBootstrap.RestrictedServerException restriction = ImpulseStandaloneBootstrap.serverRestriction(profile.address);
+            if (restriction != null) throw restriction;
+        }
         operation.update("Checking server", 0, 1);
         ImpulseStandaloneBootstrap.Discovery discovery = ImpulseStandaloneBootstrap.discoverForLaunch(profile);
         ensureLaunchActive(operation);
@@ -973,17 +820,6 @@ public final class ImpulseStandaloneUi {
         ImpulseStandaloneBootstrap.Profile prepared = ImpulseStandaloneBootstrap.prepareProfileForLaunch(
             gameDirectory, discovery, profile.selected_optional_ids);
         ensureLaunchActive(operation);
-        ImpulseGameCompat.updateInstalled(gameDirectory, prepared.id, request.minecraft_version, request.loader, operation::update);
-        ImpulseGameCompat.Snapshot gameCompat = ImpulseGameCompat.inspect(
-            gameDirectory, prepared.id, request.minecraft_version, request.loader);
-        if (gameCompat.offer_required) {
-            operation.update("Waiting for LivePatch selection", 0, 1);
-            Map<String, Object> offer = new LinkedHashMap<String, Object>();
-            offer.put("game_compat_offer", true);
-            offer.put("game_compat", gameCompat);
-            operation.result = offer;
-            return;
-        }
         List<ImpulseStandaloneBootstrap.ManifestMod> problems = ImpulseStandaloneBootstrap.problematicMods(
             discovery.manifest, prepared.selected_optional_ids);
         String signature = ImpulseStandaloneBootstrap.problematicSignature(problems);
@@ -1013,33 +849,12 @@ public final class ImpulseStandaloneUi {
         closer.start();
     }
 
-    private void gameCompatInstall(Operation operation, JsonObject command) throws Exception {
-        String profileId = required(command, "profile_id");
-        operation.result = ImpulseGameCompat.install(gameDirectory, profileId, request.minecraft_version, request.loader,
-            strings(command, "ids"), operation::update);
-    }
-
-    private void gameCompatDismiss(Operation operation, JsonObject command) throws Exception {
-        String profileId = required(command, "profile_id");
-        ImpulseGameCompat.dismissOffer(gameDirectory, profileId, required(command, "signature"));
-        operation.result = state();
-    }
-
-    private void gameCompatRecovery(Operation operation, JsonObject command) throws Exception {
-        ImpulseGameCompat.disableForRecovery(gameDirectory, required(command, "profile_id"));
-        operation.result = state();
-    }
-
-    private void gameCompatRestore(Operation operation, JsonObject command) throws Exception {
-        ImpulseGameCompat.restoreAfterRecovery(gameDirectory, required(command, "profile_id"));
-        operation.result = state();
-    }
-
     private static void ensureLaunchActive(Operation operation) throws InterruptedException {
         if (operation.cancelRequested || Thread.currentThread().isInterrupted()) throw new InterruptedException("Launch cancelled.");
     }
 
     private void searchMods(Operation operation, JsonObject command) throws Exception {
+        requireConnectedServices("Online mod services");
         StandaloneModrinthManager manager = manager(required(command, "profile_id"));
         operation.update("Searching Modrinth", 0, 1);
         operation.result = manager.search(string(command, "query"));
@@ -1102,6 +917,7 @@ public final class ImpulseStandaloneUi {
     }
 
     private StandaloneModrinthManager manager(String profileId) throws IOException {
+        requireConnectedServices("Online mod services");
         return new StandaloneModrinthManager(gameDirectory, requireProfile(profileId), request.minecraft_version, request.loader);
     }
 
@@ -1452,6 +1268,138 @@ public final class ImpulseStandaloneUi {
         writeJsonAtomic(standaloneSettingsFile(), settings);
     }
 
+    private boolean legacyMode() {
+        return ImpulseStandaloneMode.isLegacy(gameDirectory);
+    }
+
+    private void requireConnectedServices(String feature) throws IOException {
+        if (legacyMode()) throw new IOException(feature + " is unavailable after choosing to keep legacy Impulse.");
+    }
+
+    private Map<String, Object> migrationState() {
+        MigrationCampaign campaign = migrationCampaign == null ? MigrationCampaign.fallback() : migrationCampaign;
+        JsonObject settings = loadStandaloneSettings();
+        Map<String, Object> value = new LinkedHashMap<String, Object>();
+        value.put("migrate", campaign.migrate);
+        value.put("migration_date", campaign.migration_date);
+        value.put("revision", campaign.revision);
+        value.put("announcement_seen", settings.has("migration_announcement_revision")
+            && settings.get("migration_announcement_revision").getAsInt() > 0);
+        value.put("choice", string(settings, "migration_choice"));
+        value.put("prepared", preparedMigration != null);
+        value.put("prepared_version", preparedMigration == null ? "" : preparedMigration.version);
+        return value;
+    }
+
+    private void acknowledgeMigrationAnnouncement() throws IOException {
+        MigrationCampaign campaign = migrationCampaign == null ? MigrationCampaign.fallback() : migrationCampaign;
+        JsonObject settings = loadStandaloneSettings();
+        settings.addProperty("migration_announcement_revision", Math.max(1, campaign.revision));
+        writeJsonAtomic(standaloneSettingsFile(), settings);
+    }
+
+    private void chooseLegacyImpulse() throws IOException {
+        MigrationCampaign campaign = migrationCampaign == null ? MigrationCampaign.fallback() : migrationCampaign;
+        if (!campaign.migrate) throw new IOException("Migration choices are not available yet.");
+        JsonObject settings = loadStandaloneSettings();
+        settings.addProperty("migration_choice", "stay");
+        settings.addProperty("migration_announcement_revision", Math.max(1, campaign.revision));
+        writeJsonAtomic(standaloneSettingsFile(), settings);
+        ImpulseStandaloneBootstrap.setConnectedServicesEnabled(false);
+        updateRegistry = new UpdateRegistry();
+        Files.deleteIfExists(updatesCacheFile().toPath());
+        Files.deleteIfExists(updatesEtagFile().toPath());
+        Files.deleteIfExists(new File(gameDirectory, "impulse/standalone/mod-verification-cache.json").toPath());
+    }
+
+    private File migrationCacheFile() {
+        return new File(gameDirectory, "impulse/standalone/ui/cache/standalone-migration.json");
+    }
+
+    private MigrationCampaign loadCachedMigration() {
+        try {
+            File file = migrationCacheFile();
+            return file.isFile() ? parseMigration(Files.readString(file.toPath(), StandardCharsets.UTF_8)) : MigrationCampaign.fallback();
+        } catch (Exception error) {
+            System.err.println("[Impulse UI] Ignoring invalid migration cache: " + error.getMessage());
+            return MigrationCampaign.fallback();
+        }
+    }
+
+    private void refreshMigration() {
+        HttpURLConnection connection = null;
+        try {
+            String configured = System.getProperty("impulse.migration.api", MIGRATION_URL).trim();
+            URI uri = URI.create(configured);
+            boolean local = "http".equalsIgnoreCase(uri.getScheme()) && ("127.0.0.1".equals(uri.getHost()) || "localhost".equalsIgnoreCase(uri.getHost()));
+            if (!"https".equalsIgnoreCase(uri.getScheme()) && !local) throw new IOException("Migration service must use HTTPS.");
+            connection = (HttpURLConnection) uri.toURL().openConnection();
+            connection.setUseCaches(false);
+            connection.setConnectTimeout(4000);
+            connection.setReadTimeout(6000);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Cache-Control", "no-cache, no-store");
+            connection.setRequestProperty("User-Agent", "Impulse-Standalone/" + clean(request.impulse_version, "unknown"));
+            int status = connection.getResponseCode();
+            if (status != 200) throw new IOException("Migration service returned HTTP " + status + ".");
+            MigrationCampaign campaign;
+            try (InputStream input = connection.getInputStream()) {
+                campaign = parseMigration(new String(readLimited(input, 64 * 1024), StandardCharsets.UTF_8));
+            }
+            migrationCampaign = campaign;
+            writeJsonAtomic(migrationCacheFile(), campaign);
+        } catch (Exception error) {
+            System.err.println("[Impulse UI] Migration service unavailable; using the last valid state: " + error.getMessage());
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private MigrationCampaign parseMigration(String body) throws IOException {
+        MigrationCampaign campaign;
+        try { campaign = GSON.fromJson(body, MigrationCampaign.class); }
+        catch (Exception error) { throw new IOException("Invalid migration response.", error); }
+        if (campaign == null || campaign.schema_version != 1 || campaign.revision < 1
+            || campaign.migration_date == null || !campaign.migration_date.matches("\\d{4}-\\d{2}-\\d{2}")) {
+            throw new IOException("Unsupported migration response.");
+        }
+        try {
+            java.time.LocalDate parsed = java.time.LocalDate.parse(campaign.migration_date);
+            if (!parsed.toString().equals(campaign.migration_date)) throw new IOException("Invalid migration date.");
+        } catch (java.time.DateTimeException error) { throw new IOException("Invalid migration date.", error); }
+        return campaign;
+    }
+
+    private void prepareMigration(Operation operation) throws Exception {
+        refreshMigration();
+        if (migrationCampaign == null || !migrationCampaign.migrate) throw new IOException("The move to Erozion Go is not available yet.");
+        preparedMigration = ImpulseMigrationInstaller.prepare(gameDirectory, request.minecraft_version, request.loader, operation::update);
+        Map<String, Object> result = new LinkedHashMap<String, Object>();
+        result.put("migration_ready", true);
+        result.put("version", preparedMigration.version);
+        operation.result = result;
+    }
+
+    private void finishMigration() throws Exception {
+        ImpulseMigrationInstaller.schedule(gameDirectory, preparedMigration, request.parent_pid);
+        writeResult("quit", null, null);
+        completed = true;
+        Thread closer = new Thread(() -> {
+            try { Thread.sleep(250L); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            closeWindow();
+        }, "impulse-migration-close");
+        closer.setDaemon(true);
+        closer.start();
+    }
+
+    private void emergencyUpdate(Operation operation) throws Exception {
+        if (!legacyMode()) throw new IOException("Emergency updates are only available for legacy Impulse.");
+        operation.update("Checking for an emergency Impulse update", 0, 1);
+        ImpulseModUpdater.checkManually(gameDirectory, request.impulse_version, request.minecraft_version, request.loader);
+        operation.update("Emergency update check complete", 1, 1);
+        operation.result = Collections.singletonMap("checked", true);
+    }
+
     private File updatesCacheFile() {
         return new File(gameDirectory, "impulse/standalone/ui/cache/standalone-updates.json");
     }
@@ -1472,6 +1420,7 @@ public final class ImpulseStandaloneUi {
     }
 
     private void refreshUpdates() {
+        if (legacyMode()) return;
         HttpURLConnection connection = null;
         try {
             String configured = System.getProperty("impulse.updates.api", UPDATES_URL).trim();
@@ -1624,6 +1573,15 @@ public final class ImpulseStandaloneUi {
     private static final class UpdateRegistry {
         int schema_version = 1;
         List<UpdatePublication> publications = new ArrayList<UpdatePublication>();
+    }
+
+    private static final class MigrationCampaign {
+        int schema_version = 1;
+        boolean migrate;
+        String migration_date = "2026-09-19";
+        int revision = 1;
+
+        static MigrationCampaign fallback() { return new MigrationCampaign(); }
     }
 
     private static final class UpdatePublication {

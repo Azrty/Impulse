@@ -26,44 +26,6 @@ sourceSets.main.resources {
     srcDir 'src/generated/resources'
 }
 
-def generatedMusicFont = layout.buildDirectory.dir('generated/resources/music-presence')
-sourceSets.main.resources.srcDir generatedMusicFont
-
-def generateMusicPresenceFont = tasks.register('generateMusicPresenceFont') {
-    outputs.dir generatedMusicFont
-    doLast {
-        def root = generatedMusicFont.get().asFile
-        def fontDirectory = new File(root, 'assets/impulse/font')
-        def textureDirectory = new File(root, 'assets/impulse/textures/font')
-        fontDirectory.mkdirs()
-        textureDirectory.mkdirs()
-
-        def image = new java.awt.image.BufferedImage(32, 8, java.awt.image.BufferedImage.TYPE_INT_ARGB)
-        def frames = [[2, 5, 7], [5, 7, 3], [7, 3, 5], [4, 6, 2]]
-        frames.eachWithIndex { heights, frame ->
-            heights.eachWithIndex { height, bar ->
-                int x = frame * 8 + 1 + bar * 2
-                for (int px = x; px < x + 2; px++) {
-                    for (int y = 8 - height; y < 8; y++) image.setRGB(px, y, 0xFFFFFFFF as int)
-                }
-            }
-        }
-        javax.imageio.ImageIO.write(image, 'png', new File(textureDirectory, 'music_presence.png'))
-        new File(fontDirectory, 'music_presence.json').setText('''{
-  "providers": [
-    {
-      "type": "bitmap",
-      "file": "impulse:font/music_presence.png",
-      "ascent": 7,
-      "height": 8,
-      "chars": ["\\ue001\\ue002\\ue003\\ue004"]
-    }
-  ]
-}
-''', 'UTF-8')
-    }
-}
-
 sourceSets.main.java {
     srcDir '../modern-1.21-client/src/main/java'
 }
@@ -86,11 +48,12 @@ def runtimeJar = tasks.register('runtimeJar', Jar) {
     from sourceSets.main.output
     from project(':common').sourceSets.main.output
     exclude 'com/impulse/bootstrap/**'
-    exclude 'com/impulse/gamecompat/**'
     exclude 'META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator'
     exclude 'META-INF/services/net.neoforged.neoforgespi.earlywindow.GraphicsBootstrapper'
-    exclude 'META-INF/services/net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider'
-    exclude 'META-INF/services/cpw.mods.modlauncher.serviceapi.ILaunchPluginService'
+    exclude 'com/impulse/gamecompat/**'
+    exclude 'com/impulse/neoforge121/ImpulseBadge*.class'
+    exclude 'com/impulse/neoforge121/ImpulseMusicActivity121*.class'
+    exclude 'com/impulse/neoforge121/ImpulseSpotifyDetector121*.class'
 }
 
 tasks.named('jar', Jar).configure {
@@ -100,11 +63,8 @@ tasks.named('jar', Jar).configure {
     }
     from project(':common').sourceSets.main.output
     include 'com/impulse/bootstrap/**'
-    include 'com/impulse/gamecompat/**'
     include 'META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator'
     include 'META-INF/services/net.neoforged.neoforgespi.earlywindow.GraphicsBootstrapper'
-    include 'META-INF/services/net.neoforged.neoforgespi.earlywindow.ImmediateWindowProvider'
-    include 'META-INF/services/cpw.mods.modlauncher.serviceapi.ILaunchPluginService'
     include 'impulse-runtime.embedded'
     include 'impulse-version.properties'
     include '*-runtime.jar'
@@ -112,12 +72,6 @@ tasks.named('jar', Jar).configure {
     include '*.jar'
     include 'icon-mono.png'
     include 'bg_000.jpg'
-    include 'Monocraft.ttf'
-    include 'ImpulseSans.ttf'
-    include 'ImpulseSans-LICENSE.txt'
-    include 'glfailure.txt'
-    include 'impulse-loading-logo.png'
-    include 'neoforged_icon.png'
     from(runtimeJar.flatMap { it.archiveFile }) {
         rename { 'impulse-runtime.embedded' }
     }
@@ -141,28 +95,8 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
-def testGraphicsBootstrapper = tasks.register('testGraphicsBootstrapper', JavaExec) {
-    dependsOn tasks.named('testClasses')
-    classpath = sourceSets.test.runtimeClasspath
-    mainClass = 'com.impulse.bootstrap.loading.ImpulseGraphicsBootstrapperTest'
-    javaLauncher = javaToolchains.launcherFor {
-        languageVersion = JavaLanguageVersion.of(21)
-    }
-}
-tasks.named('check').configure { dependsOn testGraphicsBootstrapper }
-
-def testGameCompatLaunchPlugin = tasks.register('testGameCompatLaunchPlugin', JavaExec) {
-    dependsOn tasks.named('testClasses'), tasks.named('jar')
-    classpath = sourceSets.test.runtimeClasspath
-    mainClass = 'com.impulse.bootstrap.neoforge121.ImpulseLaunchPluginTest'
-    systemProperty 'impulse.test.jar', tasks.named('jar').flatMap { it.archiveFile }.get().asFile.absolutePath
-    jvmArgs '--add-opens=java.base/java.lang.invoke=ALL-UNNAMED'
-    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
-}
-tasks.named('check').configure { dependsOn testGameCompatLaunchPlugin }
 
 tasks.named('processResources', ProcessResources).configure {
-    dependsOn generateMusicPresenceFont
     inputs.property 'version', project.version
     filesMatching('META-INF/neoforge.mods.toml') {
         expand 'version': project.version

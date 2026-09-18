@@ -2,7 +2,6 @@ package com.impulse.bootstrap.neoforge121;
 
 import com.impulse.bootstrap.ImpulseStandaloneBootstrap;
 import com.impulse.bootstrap.StandaloneLaunchLog;
-import com.impulse.gamecompat.ImpulseGameCompat;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.ModLoadingIssue;
 import net.neoforged.fml.loading.FMLLoader;
@@ -44,8 +43,7 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
                 gameDirectory,
                 FMLLoader.versionInfo().mcVersion(),
                 "neoforge",
-                FMLLoader.versionInfo().neoForgeVersion(),
-                minecraftUsername()
+                FMLLoader.versionInfo().neoForgeVersion()
             );
             if (uiOutcome == ImpulseStandaloneBootstrap.UiOutcome.QUIT) {
                 System.exit(0);
@@ -60,29 +58,6 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
                 FMLLoader.versionInfo().neoForgeVersion()
             );
             if (result.active && result.managedModsDirectory != null) {
-                String profileId = result.profile == null ? "" : result.profile.id;
-                if (!profileId.isBlank()) {
-                    StartupNotificationManager.locatorConsumer().ifPresent(consumer -> consumer.accept("Impulse: applying compatibility patches"));
-                    try {
-                        java.util.List<File> patches = ImpulseGameCompat.activateStartupPatches(gameDirectory, profileId);
-                        StandaloneLaunchLog.info("game-compat", "Evaluating startup patches",
-                            StandaloneLaunchLog.fields("profile", profileId, "count", patches.size()));
-                        for (File patch : patches) {
-                            try {
-                                if (ImpulseLaunchPlugin.installFromJar(patch, ImpulseGameCompat.approvedTargets(gameDirectory, profileId, patch),
-                                    () -> ImpulseGameCompat.markStartupFailed(gameDirectory, profileId, patch))) {
-                                    ImpulseGameCompat.markStartupAttempt(gameDirectory, profileId);
-                                    ImpulseGameCompat.markStartupActive(gameDirectory, profileId, patch);
-                                }
-                            } catch (Throwable error) {
-                                ImpulseGameCompat.markStartupFailed(gameDirectory, profileId, patch);
-                                StandaloneLaunchLog.error("game-compat", "A startup patch failed; continuing without it", error);
-                            }
-                        }
-                    } catch (Throwable error) {
-                        StandaloneLaunchLog.error("game-compat", "A startup patch failed; continuing without its transformations", error);
-                    }
-                }
                 ImpulseStandaloneBootstrap.setProgressReporter(new NeoForgeProgressReporter());
                 StartupNotificationManager.locatorConsumer().ifPresent(consumer -> consumer.accept("Impulse: loading managed mods"));
                 IModFileCandidateLocator.forFolder(result.managedModsDirectory, "").findCandidates(launchContext, pipeline);
@@ -96,7 +71,7 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
                 }
                 StandaloneLaunchLog.markGameReached();
             }
-        } catch (Exception error) {
+        } catch (Throwable error) {
             StandaloneLaunchLog.error("discovery", "Standalone synchronization failed", error);
             pipeline.addIssue(ModLoadingIssue.error("Impulse standalone sync failed: " + error.getMessage()).withCause(error));
         }
@@ -105,23 +80,6 @@ public final class ImpulseStandaloneLocator implements IModFileCandidateLocator 
     @Override
     public String toString() {
         return "impulse-standalone";
-    }
-
-    private static String minecraftUsername() {
-        try {
-            String[] arguments = ProcessHandle.current().info().arguments().orElse(new String[0]);
-            for (int index = 0; index + 1 < arguments.length; index++) {
-                if ("--username".equals(arguments[index]) && arguments[index + 1].matches("[A-Za-z0-9_]{3,16}")) {
-                    return arguments[index + 1];
-                }
-            }
-        } catch (Throwable ignored) { }
-        try {
-            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?:^|\\s)--username\\s+([A-Za-z0-9_]{3,16})(?:\\s|$)")
-                .matcher(System.getProperty("sun.java.command", ""));
-            if (matcher.find()) return matcher.group(1);
-        } catch (Throwable ignored) { }
-        return "";
     }
 
     private static final class NeoForgeProgressReporter implements ImpulseStandaloneBootstrap.ProgressReporter {

@@ -23,4 +23,14 @@ Server safety reports are written atomically to `/reports` in the production con
 
 Launcher availability is exposed at `GET /v1/launcher/isLauncherAvailable` and persisted in `data/launcher-availability.json`. Manage it from the API directory with `npm run launcher:enable`, `npm run launcher:disable`, or `npm run launcher:status`. The endpoint serves the last valid in-memory value if the registry becomes temporarily unreadable.
 
+The Impulse-to-Erozion-Go campaign is exposed at `GET /v1/standalone/migration`. The date controls the localized announcement text; it does not open migration by itself. Manage the campaign with:
+
+```bash
+npm run migration:set -- false 2026-09-19
+npm run migration:set -- true 2026-09-19
+npm run migration:status
+```
+
+Changing the state increments its revision, writes the registry atomically, and runs the API tests. Only `migrate: true` makes the choice available to players.
+
 The client proves ownership with Mojang's session server. Access tokens never leave Minecraft; the API receives only a one-time challenge, username, UUID verification result, request IP metadata, and short-lived presence calls. Music fields are optional, client-declared, limited to 128 characters each, and can be cleared by sending `music: null` in a heartbeat. Optional cover thumbnails are SHA-256-addressed JPEG/PNG files limited to 24 KiB and remain in memory for the same short activity lifetime.

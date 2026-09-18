@@ -5,7 +5,6 @@ import com.impulse.common.ImpulseModUpdater;
 import com.impulse.common.ImpulseRuntimeDefaults;
 import com.impulse.bootstrap.StandaloneLaunchLog;
 import com.impulse.bootstrap.ImpulseStandaloneBootstrap;
-import com.impulse.gamecompat.ImpulseGameCompat;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -20,10 +19,7 @@ import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.fml.loading.FMLPaths;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
-import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
-import net.neoforged.neoforge.event.entity.player.PlayerEvent;
-import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
 import java.io.File;
 import java.lang.reflect.Method;
@@ -33,18 +29,13 @@ public final class ImpulseNeoForge121 {
     public ImpulseNeoForge121(IEventBus modEventBus, ModContainer modContainer) {
         StandaloneLaunchLog.attachFromSystemProperties(gameDirectory());
         StandaloneLaunchLog.info("runtime", "Impulse NeoForge mod initialized", null);
-        if (!ImpulseStandaloneBootstrap.isLauncherLaunch()) {
-            String profileId = System.getProperty("impulse.standalone.profile_id", "");
-            if (!profileId.isBlank()) ImpulseGameCompat.activateLivePatches(gameDirectory(), profileId, getClass().getClassLoader());
-        }
-        modEventBus.addListener(ImpulseBadgeNetwork121::registerPayloads);
         NeoForge.EVENT_BUS.register(this);
         ImpulseModUpdater.checkAsync(gameDirectory(), modContainer.getModInfo().getVersion().toString(), "1.21.1", "neoforge");
         if (FMLEnvironment.dist == Dist.CLIENT) {
             try {
                 Class.forName("com.impulse.neoforge121.ImpulseNeoForgeClientBootstrap")
-                    .getMethod("register", ModContainer.class)
-                    .invoke(null, modContainer);
+                    .getMethod("register")
+                    .invoke(null);
             } catch (Throwable error) {
                 System.err.println("[Impulse] Failed to register client menu: " + error.getMessage());
             }
@@ -67,21 +58,8 @@ public final class ImpulseNeoForge121 {
     }
 
     @SubscribeEvent
-    public void serverStopping(ServerStoppingEvent event) {
-        ImpulseBadgeNetwork121.clearServerRoster();
-        if (FMLEnvironment.dist == Dist.DEDICATED_SERVER) {
-            ImpulseManifestServer.stop();
-        }
-    }
-
-    @SubscribeEvent
-    public void playerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
-        ImpulseBadgeNetwork121.playerLoggedOut(event);
-    }
-
-    @SubscribeEvent
-    public void serverTick(ServerTickEvent.Post event) {
-        ImpulseBadgeNetwork121.expireMusic();
+    public void serverStopping(net.neoforged.neoforge.event.server.ServerStoppingEvent event) {
+        if (FMLEnvironment.dist == Dist.DEDICATED_SERVER) ImpulseManifestServer.stop();
     }
 
     @SubscribeEvent
@@ -126,7 +104,7 @@ public final class ImpulseNeoForge121 {
         try {
             return ModList.get().getModContainerById("impulse").get().getModInfo().getVersion().toString();
         } catch (Throwable ignored) {
-            return "1.3.1";
+            return "1.4.0";
         }
     }
 

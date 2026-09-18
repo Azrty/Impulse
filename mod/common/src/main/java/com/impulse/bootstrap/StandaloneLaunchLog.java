@@ -7,6 +7,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
@@ -103,7 +105,12 @@ public final class StandaloneLaunchLog {
         line.append('[').append(iso(System.currentTimeMillis())).append("] [").append(level).append("] [")
             .append(sanitize(phase)).append("] ").append(sanitize(message));
         if (fields != null && !fields.isEmpty()) line.append(" | ").append(sanitize(GSON.toJson(fields)));
-        if (error != null) line.append(" | ").append(sanitize(error.getClass().getSimpleName() + ": " + error.getMessage()));
+        if (error != null) {
+            line.append(" | ").append(sanitize(error.getClass().getSimpleName() + ": " + error.getMessage()));
+            StringWriter stack = new StringWriter();
+            error.printStackTrace(new PrintWriter(stack));
+            line.append("\n").append(sanitize(stack.toString()));
+        }
         line.append('\n');
         try {
             FileOutputStream output = new FileOutputStream(logFile, true);

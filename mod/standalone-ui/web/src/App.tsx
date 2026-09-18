@@ -1,15 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ArrowLeft, Bug, Check, ChevronLeft, ChevronRight, CircleHelp, Cog, Download, ExternalLink, FileWarning,
-  Flag, Globe2, History, ImageOff, LoaderCircle, LockKeyhole, MoreHorizontal, Package, PackagePlus, Paperclip, Play, Plus,
-  RefreshCw, Rocket, ScanSearch, Search, Server, Settings2, ShieldCheck, Sparkles, Trash2, Wrench, X,
+  AlertTriangle, ArrowLeft, Check, ChevronLeft, ChevronRight, Cog, Download, ExternalLink, FileWarning,
+  Globe2, History, ImageOff, LoaderCircle, LockKeyhole, Package, PackagePlus, Play, Plus,
+  RefreshCw, Rocket, ScanSearch, Search, Server, Settings2, ShieldCheck, Trash2, Wrench, X,
 } from 'lucide-react';
 import eruda from 'eruda';
 import { heartbeat, invoke } from './bridge';
 import { pollOperation } from './operationPolling';
-import { CrashWheel, type CrashWheelResult } from './CrashWheel';
 import impulseLogo from './generated/impulse-logo.png';
-import type { CustomMod, GameCompatSnapshot, GlobalMod, InstallPlan, Manifest, Mod, Operation, Profile, Project, SearchProject, State, UpdatePublication, UpdateSection, Version } from './types';
+import type { CustomMod, GlobalMod, InstallPlan, Manifest, MigrationState, Mod, Operation, Profile, Project, SearchProject, State, Version } from './types';
 
 type Tab = 'overview' | 'mods';
 type ModView = 'installed' | 'search' | 'project' | 'versions';
@@ -72,50 +71,16 @@ export function App() {
   const [address, setAddress] = useState('');
   const [operation, setOperation] = useState<Operation>();
   const [warning, setWarning] = useState<Warning>();
-  const [gameCompatOffer, setGameCompatOffer] = useState<GameCompatSnapshot>();
-  const [compatOpen, setCompatOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-  const [reportOpen, setReportOpen] = useState(false);
-  const [notice, setNotice] = useState('');
   const [optionalOpen, setOptionalOpen] = useState(false);
   const [modManagerOpen, setModManagerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [newsOpen, setNewsOpen] = useState(false);
-  const [bugReportOpen, setBugReportOpen] = useState(false);
   const [developerToolsOpen, setDeveloperToolsOpen] = useState(false);
-  const [crashWheel, setCrashWheel] = useState<CrashWheelResult>();
-  const [crashWheelParticipant, setCrashWheelParticipant] = useState(false);
+  const [migrationAnnouncementOpen, setMigrationAnnouncementOpen] = useState(false);
+  const [migrationDecisionOpen, setMigrationDecisionOpen] = useState(false);
+  const [migrationReady, setMigrationReady] = useState<{ version: string }>();
   const pollRef = useRef<(() => void) | undefined>(undefined);
-  const updatesRefreshed = useRef(false);
   const pageRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    document.documentElement.classList.toggle('crash-wheel-participant', crashWheelParticipant);
-    return () => document.documentElement.classList.remove('crash-wheel-participant');
-  }, [crashWheelParticipant]);
-
-  useEffect(() => {
-    if (!state?.legal_accepted) return;
-    let active = true;
-    let timer: number | undefined;
-    const checkParticipation = async () => {
-      try {
-        const result = await invoke<{ pending: boolean; participating?: boolean }>('crashWheelParticipation');
-        if (!active) return;
-        if (result.pending) timer = window.setTimeout(checkParticipation, 300);
-        else {
-          setCrashWheelParticipant(result.participating === true);
-          timer = window.setTimeout(checkParticipation, 15000);
-        }
-      } catch {
-        setCrashWheelParticipant(false);
-        timer = window.setTimeout(checkParticipation, 15000);
-      }
-    };
-    void checkParticipation();
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [state?.legal_accepted]);
 
   const loadState = useCallback(async () => {
     try { setState(await invoke<State>('state')); setError(''); }
@@ -164,12 +129,6 @@ export function App() {
     hideDeveloperTools();
     setDeveloperToolsOpen(false);
   }, [developerToolsOpen, state?.developer_tools_enabled]);
-
-  useEffect(() => {
-    if (!state?.legal_accepted || updatesRefreshed.current) return;
-    updatesRefreshed.current = true;
-    void invoke<State>('refreshUpdates').then(setState).catch(() => undefined);
-  }, [state?.legal_accepted]);
 
   useEffect(() => {
     const edit = async (event: KeyboardEvent) => {
@@ -257,14 +216,11 @@ export function App() {
           finish();
           return true;
         }
-        const result = next.result as { confirmation_required?: boolean; mods?: Mod[]; signature?: string; report_submitted?: boolean; report_id?: string; game_compat_offer?: boolean; game_compat?: GameCompatSnapshot } | State | undefined;
+        const result = next.result as { confirmation_required?: boolean; mods?: Mod[]; signature?: string; migration_ready?: boolean; version?: string } | State | undefined;
         if (result && 'confirmation_required' in result && result.confirmation_required) {
           setWarning({ mods: result.mods || [], signature: result.signature || '' });
-        } else if (result && 'game_compat_offer' in result && result.game_compat_offer && result.game_compat) {
-          setGameCompatOffer(result.game_compat);
-        } else if (result && 'report_submitted' in result && result.report_submitted) {
-          setNotice(`Report submitted${result.report_id ? ` · ${result.report_id}` : ''}`);
-          window.setTimeout(() => setNotice(''), 5000);
+        } else if (result && 'migration_ready' in result && result.migration_ready) {
+          setMigrationReady({ version: result.version || '0.1.0' });
         } else if (result && 'profiles' in result) {
           setState(result as State);
           if (next.kind === 'add') {
@@ -298,11 +254,9 @@ export function App() {
 
   if (!state) return <Boot error={error} />;
   if (!state.legal_accepted) return <Legal state={state} onAccepted={setState} />;
+  if (state.migration.migrate && state.migration.choice !== 'stay') return <MigrationDecision migration={state.migration} operation={operation?.kind === 'migrate' ? operation : undefined} ready={migrationReady} onMigrate={() => start('migrate')} onStay={async () => setState(await invoke<State>('stayOnImpulse'))} onFinish={() => invoke('finishMigration')} onQuit={() => invoke('quit')} />;
+  if (!state.migration.migrate && !state.migration.announcement_seen) return <MigrationAnnouncement migration={state.migration} onContinue={async () => setState(await invoke<State>('ackMigrationAnnouncement'))} />;
   if (!state.onboarding_completed) return <Onboarding onComplete={async () => setState(await invoke<State>('completeOnboarding'))} />;
-
-  const pendingPublication = (state.publications || []).find(publication =>
-    publication.versions.includes(state.impulse_version) && !(state.dismissed_update_ids || []).includes(publication.id));
-  if (pendingPublication) return <WhatsNew publication={pendingPublication} mode="automatic" onClose={async () => setState(await invoke<State>('dismissUpdate', { id: pendingPublication.id }))} />;
 
   const profile = state.selected_profile;
   const manifest = state.manifest;
@@ -315,19 +269,8 @@ export function App() {
   };
 
   const launch = async (acceptUnverified = false) => {
-    setProfileMenuOpen(false);
     if (!profile) return;
-    try {
-      const wheel = await invoke<CrashWheelResult>('crashWheel');
-      setCrashWheelParticipant(wheel.required);
-      if (wheel.required && !wheel.passed) {
-        setCrashWheel(wheel);
-        return;
-      }
-      start('play', { profile_id: profile.id, accept_unverified: acceptUnverified });
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    }
+    start('play', { profile_id: profile.id, accept_unverified: acceptUnverified });
   };
   const cancelLaunch = async () => {
     if (!operation?.id || operation.kind !== 'play' || operation.status !== 'running') return;
@@ -339,19 +282,12 @@ export function App() {
     }
   };
 
-  if (crashWheel && profile) return <CrashWheel round={crashWheel} onSurvived={async () => {
-    setCrashWheel(undefined);
-    await start('play', { profile_id: profile.id, accept_unverified: false });
-  }} onError={message => { setCrashWheel(undefined); setError(message); }} />;
-
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong></div>
         <div className="topbar-actions">
-          <button className="secondary" disabled={!profile || busy} onClick={() => setCompatOpen(true)}><Wrench size={15} /> LivePatch</button>
-          <button className="whats-new-button" onClick={() => setNewsOpen(true)}><Sparkles size={15} /> What’s new</button>
-          <button className="icon-button" title="Report a bug" aria-label="Report a bug" onClick={() => setBugReportOpen(true)}><CircleHelp size={17} /></button>
+          {!state.migration.migrate && <button className="migration-reminder" onClick={() => setMigrationAnnouncementOpen(true)}><Rocket size={15} /><span>Erozion Go</span><small>{formatMigrationDate(state.migration.migration_date)}</small></button>}
           <button className="icon-button topbar-settings" title="Settings" aria-label="Settings" onClick={() => setSettingsOpen(true)}><Cog size={17} /></button>
         </div>
       </header>
@@ -377,7 +313,7 @@ export function App() {
                 <button className={tab === 'mods' ? 'active' : ''} onClick={() => setTab('mods')}>Mods</button>
               </nav>
               <div className="page-scroll" ref={pageRef}>
-                {tab === 'overview' ? <Overview manifest={manifest} /> : <Mods manifest={manifest} onOptional={() => setOptionalOpen(true)} onCustom={() => setModManagerOpen(true)} />}
+                {tab === 'overview' ? <Overview manifest={manifest} /> : <Mods manifest={manifest} onlineModsEnabled={!state.legacy_mode} onOptional={() => setOptionalOpen(true)} onCustom={() => setModManagerOpen(true)} />}
               </div>
               <div className="playbar">
                 <button className="icon-button" title="Refresh server" disabled={busy} onClick={() => start('refresh', { profile_id: profile.id })}><RefreshCw size={18} /></button>
@@ -385,16 +321,9 @@ export function App() {
                   <span className="play-fill" style={{ width: busy ? `${Math.max(5, progress * 100)}%` : '0%' }} />
                   <span className="play-content">{busy ? <LoaderCircle className="spin" size={19} /> : <Play size={19} fill="currentColor" />}<span className="play-label">{busy ? operation?.message : 'Play'}</span></span>
                 </button>
-                <div className="profile-actions">
-                  {busy && operation?.kind === 'play'
-                    ? <button className="icon-button cancel-launch" title="Cancel launch" aria-label="Cancel launch" onClick={cancelLaunch}><X size={20} /></button>
-                    : <button className="icon-button" title="Profile actions" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen(value => !value)}><MoreHorizontal size={20} /></button>}
-                  {!busy && profileMenuOpen && <div className="context-menu">
-                    <button onClick={() => { setProfileMenuOpen(false); setReportOpen(true); }}><Flag size={16} /> Report server</button>
-                    <div />
-                    <button className="destructive" onClick={() => { setProfileMenuOpen(false); setDeleteOpen(true); }}><Trash2 size={16} /> Remove server</button>
-                  </div>}
-                </div>
+                {busy && operation?.kind === 'play'
+                  ? <button className="icon-button cancel-launch" title="Cancel launch" aria-label="Cancel launch" onClick={cancelLaunch}><X size={20} /></button>
+                  : <button className="icon-button destructive" title="Remove server" aria-label="Remove server" disabled={busy} onClick={() => setDeleteOpen(true)}><Trash2 size={20} /></button>}
               </div>
             </>
           )}
@@ -402,24 +331,14 @@ export function App() {
       </main>
 
       {error && <div className="toast error"><AlertTriangle size={18} /><span>{error}</span><button onClick={() => setError('')}><X size={17} /></button></div>}
-      {notice && <div className="toast success"><Check size={18} /><span>{notice}</span><button onClick={() => setNotice('')}><X size={17} /></button></div>}
       {adding && <AddServer address={address} setAddress={value => { setAddress(value); if (error) setError(''); }} busy={busy} error={operation?.kind === 'add' ? error : ''} onClose={() => !busy && setAdding(false)} onAdd={() => start('add', { address })} />}
       {deleteOpen && profile && <Confirm title="Remove this server?" text="This removes its managed files and settings. Your global mods are not changed." confirm="Remove server" destructive onClose={() => setDeleteOpen(false)} onConfirm={() => { setDeleteOpen(false); start('delete', { profile_id: profile.id }); }} />}
-      {reportOpen && profile && <ReportServer profile={profile} busy={busy} onClose={() => setReportOpen(false)} onSubmit={(category, details) => { setReportOpen(false); start('report', { profile_id: profile.id, category, details }); }} />}
       {optionalOpen && profile && manifest && <OptionalMods profile={profile} manifest={manifest} onClose={() => setOptionalOpen(false)} onSave={ids => { setOptionalOpen(false); start('optional', { profile_id: profile.id, ids }); }} />}
       {warning && <VerificationWarning warning={warning} onCancel={() => setWarning(undefined)} onContinue={() => { setWarning(undefined); void launch(true); }} />}
-      {compatOpen && profile && <GameCompatManager snapshot={state.game_compat} busy={busy} onClose={() => setCompatOpen(false)} onInstall={id => start('gameCompatInstall', { profile_id: profile.id, ids: [id] })} onToggle={(id, enabled) => start('gameCompatToggle', { profile_id: profile.id, id, enabled })} onRestore={() => start('gameCompatRestore', { profile_id: profile.id })} />}
-      {gameCompatOffer && profile && <GameCompatOffer snapshot={gameCompatOffer} busy={busy} onClose={() => setGameCompatOffer(undefined)} onContinue={ids => {
-        const snapshot = gameCompatOffer;
-        setGameCompatOffer(undefined);
-        if (ids.length) start('gameCompatInstall', { profile_id: profile.id, ids });
-        else start('gameCompatDismiss', { profile_id: profile.id, signature: snapshot.offer_signature });
-      }} />}
-      {profile && state.game_compat?.recovery_available && <Confirm title="Start without LivePatch?" text="Minecraft did not reach its menu after a startup patch changed. Disable LivePatch for this profile and try again." confirm="Disable patches" onClose={() => undefined} onConfirm={() => start('gameCompatRecovery', { profile_id: profile.id })} />}
       {modManagerOpen && profile && <ModManager profile={profile} state={state} start={start} operation={operation} onClose={async () => { setModManagerOpen(false); await loadState(); }} />}
-      {settingsOpen && <StandaloneSettings state={state} developerToolsOpen={developerToolsOpen} onToggleDeveloperTools={toggleDeveloperTools} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onNews={() => { setSettingsOpen(false); setNewsOpen(true); }} onReportBug={() => { setSettingsOpen(false); setBugReportOpen(true); }} />}
-      {newsOpen && <NewsHistory publications={state.publications || []} currentVersion={state.impulse_version} dismissed={state.dismissed_update_ids || []} onClose={() => setNewsOpen(false)} />}
-      {bugReportOpen && <BugReport operation={operation?.kind === 'reportBug' ? operation : undefined} onClose={() => setBugReportOpen(false)} onSubmit={(description, includeDiagnostics, screenshots) => start('reportBug', { description, include_diagnostics: includeDiagnostics, screenshots })} />}
+      {settingsOpen && <StandaloneSettings state={state} busy={busy} developerToolsOpen={developerToolsOpen} onToggleDeveloperTools={toggleDeveloperTools} onClose={() => setSettingsOpen(false)} onChange={setState} onReplay={async () => { setSettingsOpen(false); setState(await invoke<State>('replayOnboarding')); }} onMigrate={() => { setSettingsOpen(false); setMigrationDecisionOpen(true); }} onEmergencyUpdate={() => start('emergencyUpdate')} />}
+      {migrationAnnouncementOpen && <MigrationAnnouncement migration={state.migration} modal onContinue={() => setMigrationAnnouncementOpen(false)} />}
+      {migrationDecisionOpen && <div className="migration-layer"><MigrationDecision migration={state.migration} operation={operation?.kind === 'migrate' ? operation : undefined} ready={migrationReady} onMigrate={() => start('migrate')} onStay={async () => { setState(await invoke<State>('stayOnImpulse')); setMigrationDecisionOpen(false); }} onFinish={() => invoke('finishMigration')} onQuit={() => setMigrationDecisionOpen(false)} /></div>}
     </div>
   );
 }
@@ -436,37 +355,50 @@ function Legal({ state, onAccepted }: { state: State; onAccepted: (state: State)
   return <div className="legal-screen"><div className="legal-card"><div className="legal-icon"><ShieldCheck /></div><span className="eyebrow">Before you continue</span><h1>Welcome to Impulse</h1><p>Impulse needs your agreement to its Privacy Policy and Terms of Service. These documents explain how the software works, the services it contacts, and the rules that apply when you use it.</p><div className="legal-links"><button onClick={() => open(state.privacy_url)}>Privacy Policy <ExternalLink size={15} /></button><button onClick={() => open(state.terms_url)}>Terms of Service <ExternalLink size={15} /></button></div><label className="check"><input type="checkbox" checked={privacy} onChange={e => setPrivacy(e.target.checked)} /><span><Check size={14} /></span>I have read and accept the Privacy Policy.</label><label className="check"><input type="checkbox" checked={terms} onChange={e => setTerms(e.target.checked)} /><span><Check size={14} /></span>I have read and accept the Terms of Service.</label><div className="modal-actions"><button className="secondary" onClick={() => invoke('quit')}>Quit Minecraft</button><button className="primary" disabled={!privacy || !terms || busy} onClick={async () => { setBusy(true); onAccepted(await invoke<State>('acceptLegal')); }}>Accept and continue</button></div></div></div>;
 }
 
-function GameCompatManager({ snapshot, busy, onClose, onInstall, onToggle, onRestore }: { snapshot?: GameCompatSnapshot; busy: boolean; onClose: () => void; onInstall: (id: string) => void; onToggle: (id: string, enabled: boolean) => void; onRestore: () => void }) {
-  return <div className="modal-backdrop"><div className="modal game-compat-offer" role="dialog" aria-modal="true" aria-labelledby="compat-title">
-    <button className="modal-close" onClick={onClose} aria-label="Close LivePatch"><X /></button>
-    <div className="game-compat-heading"><span><Wrench /></span><div><span className="eyebrow">Your profile</span><h2 id="compat-title">LivePatch</h2><p>Compatibility patches for your next launch.</p></div></div>
-    {snapshot?.error && <div className="inline-warning"><AlertTriangle />{snapshot.error}</div>}
-    {snapshot?.recovery_disabled && <div className="inline-warning"><AlertTriangle />LivePatch is disabled for recovery. <button className="secondary" disabled={busy} onClick={onRestore}>Restore patches next launch</button></div>}
-    <div className="game-compat-list">{snapshot?.patches.map(patch => <div className="game-compat-row compat-manager-row" key={patch.id}>
-      <span className="game-compat-copy"><strong>{patch.name}</strong><small>{patch.description}</small><small>{patch.version} · {patch.status}</small></span>
-      {patch.installed && <label className="compat-toggle"><input type="checkbox" disabled={busy} checked={patch.enabled} onChange={event => onToggle(patch.id, event.target.checked)} />Enabled</label>}
-      {(!patch.installed || patch.update_available) && <button className="secondary" disabled={busy} onClick={() => onInstall(patch.id)}><Download size={16} />{patch.installed ? 'Update' : 'Install'}</button>}
-    </div>)}</div>
-    {!snapshot?.patches.length && <p>{snapshot?.catalog_available ? 'No compatibility patches are available for this profile.' : 'The patch catalog is currently unavailable.'}</p>}
-  </div></div>;
+function formatMigrationDate(value: string) {
+  const parsed = new Date(`${value}T12:00:00`);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
 }
 
-function GameCompatOffer({ snapshot, busy, onClose, onContinue }: { snapshot: GameCompatSnapshot; busy: boolean; onClose: () => void; onContinue: (ids: string[]) => void }) {
-  const available = snapshot.patches.filter(patch => !patch.installed || patch.update_available);
-  const [selected, setSelected] = useState<string[]>(available.map(patch => patch.id));
-  const toggle = (id: string) => setSelected(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id]);
-  return <div className="modal-backdrop game-compat-backdrop"><div className="modal game-compat-offer">
-    <button className="modal-close" disabled={busy} onClick={onClose}><X /></button>
-    <div className="game-compat-heading"><span><Wrench /></span><div><span className="eyebrow">LivePatch</span><h2>Some of your mods can work better with LivePatch</h2><p>These optional patches improve compatibility without changing your mod files. You stay in control of what is installed.</p></div></div>
-    <div className="game-compat-list">{available.map(patch => <label key={patch.id} className="game-compat-row">
-      <input type="checkbox" checked={selected.includes(patch.id)} onChange={() => toggle(patch.id)} />
-      <span className="check-box"><Check /></span>
-      <span className="game-compat-copy"><strong>{patch.name}</strong><small>{patch.description}</small></span>
-      <span className="game-compat-meta">{patch.mode === 'startup' ? 'Restart' : 'Live'} · {patch.version}</span>
-    </label>)}</div>
-    {snapshot.error && <div className="inline-warning"><AlertTriangle />{snapshot.error}</div>}
-    <div className="modal-actions"><button className="secondary" disabled={busy} onClick={() => onContinue([])}>Continue without patches</button><button className="primary" disabled={busy || !selected.length} onClick={() => onContinue(selected)}><Download /> Install selected</button></div>
-  </div></div>;
+const migrationBenefits = [
+  ['A cleaner experience', 'A refined interface designed to make every launch easier.'],
+  ['Better protection', 'Keep receiving security updates and safer server checks.'],
+  ['Play with friends', 'Find friends and join them more easily.'],
+  ['More Minecraft versions', 'Use Erozion Go across more versions of Minecraft.'],
+  ['Personal modpacks', 'Prepare and launch modpacks for solo play.'],
+  ['New cosmetics', 'Unlock more ways to personalize your experience.'],
+  ['Erozion Nexus', 'Create and manage Minecraft servers from Erozion Go. Coming later.'],
+] as const;
+
+const legacyTradeoffs = [
+  ['No ongoing support', 'Problems will no longer be investigated or fixed.'],
+  ['Future servers may stop working', 'Servers will keep evolving while this version of Impulse stays unchanged.'],
+  ['Connected features will end', 'Online services and future integrated features will no longer be available.'],
+  ['Reduced protection', 'Local signatures and file hashes remain checked, but new security warnings and fixes will stop.'],
+  ['Manual emergency updates only', 'Impulse will no longer update automatically.'],
+] as const;
+
+function MigrationAnnouncement({ migration, modal = false, onContinue }: { migration: MigrationState; modal?: boolean; onContinue: () => void | Promise<void> }) {
+  return <div className={`migration-screen announcement ${modal ? 'modal-announcement' : ''}`}>
+    <div className="migration-ambient" />
+    <header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong></div>{modal && <button className="onboarding-close" onClick={onContinue}><X /></button>}</header>
+    <main>
+      <section className="migration-hero-copy"><span className="eyebrow">A new chapter begins {formatMigrationDate(migration.migration_date)}</span><h1>Impulse is becoming Erozion Go</h1><p>On {formatMigrationDate(migration.migration_date)}, you’ll be able to move to Erozion Go or keep using Impulse as it is. Your saved servers and setup will remain available.</p><div className="migration-choice-preview"><span><Rocket /><strong>Move forward</strong><small>Continue with new features, security updates and support.</small></span><i>or</i><span><History /><strong>Keep Impulse</strong><small>Keep this installation as an unsupported, offline-focused version.</small></span></div></section>
+      <aside className="migration-date-art" aria-hidden="true"><div><small>THE NEXT GENERATION</small><strong>EROZION</strong><b>GO</b><span>{formatMigrationDate(migration.migration_date)}</span></div></aside>
+    </main>
+    <footer><span>No decision is needed today.</span><button className="primary" onClick={onContinue}>Got it <ChevronRight /></button></footer>
+  </div>;
+}
+
+function MigrationDecision({ migration, operation, ready, onMigrate, onStay, onFinish, onQuit }: { migration: MigrationState; operation?: Operation; ready?: { version: string }; onMigrate: () => void; onStay: () => Promise<void>; onFinish: () => void | Promise<unknown>; onQuit: () => void | Promise<unknown> }) {
+  const [stayConfirm, setStayConfirm] = useState(false);
+  const busy = operation?.status === 'running';
+  const progress = Math.min(1, (operation?.completed || 0) / Math.max(1, operation?.total || 1));
+  if (ready) return <div className="migration-screen migration-ready"><div className="migration-ambient" /><header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong></div></header><main><div className="migration-ready-mark"><Check /></div><span className="eyebrow">Migration prepared</span><h1>Erozion Go is ready</h1><p>Version {ready.version} has been downloaded and verified. Close Minecraft, then start it again from your launcher to finish the move.</p><button className="primary migration-finish" onClick={onFinish}>Close Minecraft and finish <ChevronRight /></button></main></div>;
+  return <div className="migration-screen decision"><div className="migration-ambient" /><header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong></div><button className="onboarding-close" title="Quit Minecraft" disabled={busy} onClick={onQuit}><X /></button></header><main><div className="migration-decision-heading"><span className="eyebrow">The choice is now available</span><h1>Choose what comes next</h1><p>Your servers and setup can move with you. Nothing is selected by default.</p></div><div className="migration-options">
+    <section className="migration-option recommended"><div className="option-heading"><span><Rocket /></span><div><small>RECOMMENDED</small><h2>Move to Erozion Go</h2><p>Bring your current servers and setup to the next generation of Impulse.</p></div></div><div className="migration-feature-list">{migrationBenefits.map(([title, text]) => <div key={title}><Check /><span><strong>{title}</strong><small>{text}</small></span></div>)}</div><button className="primary" disabled={busy} onClick={onMigrate}>{busy ? <><LoaderCircle className="spin" /> {operation?.message || 'Preparing Erozion Go'}</> : <>Move to Erozion Go <ChevronRight /></>}</button>{busy && <div className="migration-progress"><i style={{ width: `${Math.max(4, progress * 100)}%` }} /></div>}</section>
+    <section className="migration-option legacy"><div className="option-heading"><span><History /></span><div><small>STANDALONE</small><h2>Keep Impulse</h2><p>Impulse can remain on this computer, but it will no longer be maintained.</p></div></div><div className="migration-feature-list">{legacyTradeoffs.map(([title, text]) => <div key={title}><AlertTriangle /><span><strong>{title}</strong><small>{text}</small></span></div>)}</div><button className="secondary" disabled={busy} onClick={() => setStayConfirm(true)}>Keep Impulse</button></section>
+  </div>{operation?.status === 'error' && <div className="migration-error"><AlertTriangle />{operation.error || 'Erozion Go could not be prepared. Impulse was not changed.'}</div>}</main>{stayConfirm && <Confirm title="Keep this unsupported version of Impulse?" text="Connected services, future security updates and ongoing support will be disabled. You can still migrate later from Settings once migration is available." confirm="Keep Impulse" destructive onClose={() => setStayConfirm(false)} onConfirm={() => void onStay()} />}</div>;
 }
 
 const onboardingPages = [
@@ -493,100 +425,8 @@ function Onboarding({ onComplete }: { onComplete: () => Promise<void> }) {
   </div>;
 }
 
-function updateIcon(name: UpdateSection['icon']) {
-  if (name === 'shield-check') return ShieldCheck;
-  if (name === 'package-plus') return PackagePlus;
-  if (name === 'scan-check') return ScanSearch;
-  if (name === 'wrench') return Wrench;
-  if (name === 'rocket') return Rocket;
-  if (name === 'server') return Server;
-  if (name === 'download') return Download;
-  return Sparkles;
-}
-
-function WhatsNew({ publication, mode, onClose, onPrevious, onNext, position }: { publication: UpdatePublication; mode: 'automatic' | 'history'; onClose: () => void | Promise<void>; onPrevious?: () => void; onNext?: () => void; position?: string }) {
-  const hero = useNativeImage(publication.hero_image_url || undefined);
-  return <div className="whats-new-screen">
-    <div className="news-ambient" style={hero ? { backgroundImage: `linear-gradient(90deg, rgba(3,3,3,.93), rgba(3,3,3,.62)), url(${hero})` } : undefined} />
-    <header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong><span>{mode === 'automatic' ? 'Updated' : 'What’s new'}</span></div><button className="onboarding-close" title="Close" onClick={onClose}><X /></button></header>
-    <main><div className="news-heading"><span className="eyebrow">{mode === 'automatic' ? 'Impulse just got better' : new Date(publication.published_at).toLocaleDateString()}</span><h1>{publication.title}</h1><p>{publication.subtitle}</p><div className="news-versions">For {publication.versions.join(' · ')}</div></div><div className="news-sections">{publication.sections.map(section => { const Icon = updateIcon(section.icon); return <article key={`${publication.id}-${section.title}`}><span><Icon /></span><div><h2>{section.title}</h2><p>{section.body}</p></div></article>; })}</div></main>
-    <footer>{mode === 'history' ? <><button className="secondary news-nav" disabled={!onPrevious} onClick={onPrevious}><ChevronLeft /> Newer</button><span>{position}</span><button className="secondary news-nav" disabled={!onNext} onClick={onNext}>Older <ChevronRight /></button></> : <><span>Discover what changed, then continue to your servers.</span><button className="primary" onClick={onClose}>Continue <ChevronRight /></button></>}</footer>
-  </div>;
-}
-
-function NewsHistory({ publications, currentVersion, dismissed, onClose }: { publications: UpdatePublication[]; currentVersion: string; dismissed: string[]; onClose: () => void }) {
-  const [index, setIndex] = useState(0);
-  if (!publications.length) return <div className="modal-backdrop"><div className="modal"><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">What’s new</span><h2>No publications yet</h2><p>There are no Impulse update notes available right now.</p><div className="modal-actions"><button className="primary" onClick={onClose}>Close</button></div></div></div>;
-  const publication = publications[Math.min(index, publications.length - 1)];
-  return <div className="news-history-layer"><WhatsNew publication={publication} mode="history" onClose={onClose} onPrevious={index > 0 ? () => setIndex(value => value - 1) : undefined} onNext={index < publications.length - 1 ? () => setIndex(value => value + 1) : undefined} position={`${index + 1} of ${publications.length}${publication.versions.includes(currentVersion) ? ' · This version' : ''}${dismissed.includes(publication.id) ? ' · Read' : ''}`} /></div>;
-}
-
-type BugScreenshot = { id: string; name: string; mime: string; base64: string; preview: string; size: number };
-type BugReportInfo = { attachments: { name: string; size: number; kind: string }[] };
-type PickedScreenshot = { name: string; mime: string; base64: string };
-
-async function compressScreenshot(file: File): Promise<BugScreenshot> {
-  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error(`${file.name} is not a supported image.`);
-  const bitmap = await createImageBitmap(file);
-  if (bitmap.width * bitmap.height > 40_000_000) { bitmap.close(); throw new Error(`${file.name} is larger than 40 megapixels.`); }
-  let scale = Math.min(1, 2560 / Math.max(bitmap.width, bitmap.height));
-  let blob: Blob | null = null;
-  for (let pass = 0; pass < 8; pass += 1) {
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-    const context = canvas.getContext('2d');
-    if (!context) { bitmap.close(); throw new Error('Impulse could not process this screenshot.'); }
-    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    const quality = Math.max(.48, .9 - pass * .07);
-    blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
-    if (blob && blob.size <= 5 * 1024 * 1024) break;
-    scale *= .82;
-  }
-  bitmap.close();
-  if (!blob || blob.size > 5 * 1024 * 1024) throw new Error(`${file.name} could not be compressed below 5 MiB.`);
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-  return { id: crypto.randomUUID(), name: file.name, mime: 'image/jpeg', base64: btoa(binary), preview: URL.createObjectURL(blob), size: blob.size };
-}
-
-function BugReport({ operation, onClose, onSubmit }: { operation?: Operation; onClose: () => void; onSubmit: (description: string, includeDiagnostics: boolean, screenshots: Omit<BugScreenshot, 'preview' | 'id' | 'name' | 'size'>[]) => void }) {
-  const [description, setDescription] = useState('');
-  const [includeDiagnostics, setIncludeDiagnostics] = useState(true);
-  const [screenshots, setScreenshots] = useState<BugScreenshot[]>([]);
-  const [info, setInfo] = useState<BugReportInfo>({ attachments: [] });
-  const [localError, setLocalError] = useState('');
-  const [processing, setProcessing] = useState(false);
-  const screenshotsRef = useRef<BugScreenshot[]>([]);
-  const busy = operation?.status === 'running';
-  const result = operation?.status === 'done' ? operation.result as { report_submitted?: boolean; report_id?: string } : undefined;
-  useEffect(() => { void invoke<BugReportInfo>('bugReportInfo').then(setInfo).catch(() => undefined); }, []);
-  useEffect(() => { screenshotsRef.current = screenshots; }, [screenshots]);
-  useEffect(() => () => screenshotsRef.current.forEach(item => URL.revokeObjectURL(item.preview)), []);
-  const pickImages = async () => {
-    if (busy || processing || screenshots.length >= 5 || result?.report_submitted) return;
-    setProcessing(true); setLocalError('');
-    try {
-      const picked = await invoke<PickedScreenshot[]>('pickScreenshots');
-      if (screenshots.length + picked.length > 5) throw new Error('You can attach up to five screenshots.');
-      const added: BugScreenshot[] = [];
-      for (const item of picked) {
-        const binary = atob(item.base64);
-        const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-        added.push(await compressScreenshot(new File([bytes], item.name, { type: item.mime })));
-      }
-      setScreenshots(current => [...current, ...added]);
-    } catch (reason) { setLocalError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setProcessing(false); }
-  };
-  const remove = (id: string) => setScreenshots(current => { const item = current.find(value => value.id === id); if (item) URL.revokeObjectURL(item.preview); return current.filter(value => value.id !== id); });
-  const valid = description.trim().length >= 20 && description.trim().length <= 10000;
-  return <div className="bug-report-screen"><header><div className="brand"><span className="brand-mark"><img src={impulseLogo} alt="" /></span><strong>IMPULSE</strong><span>Support</span></div><button className="onboarding-close" disabled={busy} onClick={onClose}><X /></button></header><main><section className="bug-report-copy"><span className="eyebrow">Report a bug</span><h1>Help us make Impulse better</h1><p>Describe what happened and what you expected. Technical details are only included when the option below is enabled.</p><label className="field"><span>What happened?</span><textarea autoFocus disabled={busy || !!result?.report_submitted} value={description} maxLength={10000} onChange={event => setDescription(event.target.value)} placeholder="Tell us what you were doing, what went wrong, and whether you can reproduce it." /><small>{description.trim().length}/10,000 · minimum 20 characters</small></label><label className="diagnostics-check"><input type="checkbox" checked={includeDiagnostics} disabled={busy || !!result?.report_submitted} onChange={event => setIncludeDiagnostics(event.target.checked)} /><span><Check /></span><div><strong>Include diagnostics</strong><small>Attach anonymous technical details from the previous launch.</small></div></label>{includeDiagnostics && <details className="diagnostic-files" open><summary>{info.attachments.length} diagnostic file{info.attachments.length === 1 ? '' : 's'} selected</summary>{info.attachments.length ? info.attachments.map(file => <div key={`${file.kind}-${file.name}`}><Paperclip /><span>{file.name}</span><small>{fmtBytes(file.size)}</small></div>) : <p>No previous-launch diagnostics are available.</p>}</details>}</section><aside className="bug-screenshots"><div><span className="eyebrow">Screenshots</span><h2>Add visual context</h2><p>Up to five images. Impulse compresses them before upload.</p></div><button type="button" className="screenshot-picker" disabled={busy || processing || screenshots.length >= 5 || !!result?.report_submitted} onClick={() => void pickImages()}><Plus /><strong>{processing ? 'Processing images…' : 'Add screenshots'}</strong><small>PNG, JPEG or WebP · 5 MiB each after compression</small></button><div className="screenshot-grid">{screenshots.map(item => <figure key={item.id}><img src={item.preview} alt={item.name} /><button disabled={busy} onClick={() => remove(item.id)}><X /></button><figcaption>{fmtBytes(item.size)}</figcaption></figure>)}</div></aside></main><footer><div>{(localError || operation?.error) && <span className="bug-error"><AlertTriangle />{localError || operation?.error}</span>}{result?.report_submitted && <span className="bug-success"><Check />Report received · {result.report_id}</span>}</div><div><button className="secondary" disabled={busy} onClick={onClose}>{result?.report_submitted ? 'Close' : 'Cancel'}</button>{!result?.report_submitted && <button className="primary" disabled={!valid || busy || processing} onClick={() => onSubmit(description.trim(), includeDiagnostics, screenshots.map(({ mime, base64 }) => ({ mime, base64 })))}>{busy ? <><LoaderCircle className="spin" /> Sending…</> : operation?.status === 'error' ? 'Try again' : 'Submit report'}</button>}</div></footer></div>;
-}
-
-function StandaloneSettings({ state, developerToolsOpen, onToggleDeveloperTools, onClose, onChange, onReplay, onNews, onReportBug }: { state: State; developerToolsOpen: boolean; onToggleDeveloperTools: () => void; onClose: () => void; onChange: (state: State) => void; onReplay: () => void; onNews: () => void; onReportBug: () => void }) {
-  return <div className="modal-backdrop"><div className="modal settings-modal"><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">Impulse</span><h2>Settings</h2><p>Manage how this Impulse installation behaves.</p><section className="settings-section"><div><strong>Update channel</strong><small>Stable receives production releases. Beta also receives previews.</small></div><div className="segments">{(['stable', 'beta'] as const).map(channel => <button key={channel} className={state.update_channel === channel ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setUpdateChannel', { channel }))}>{channel}</button>)}</div></section><section className="settings-section"><div><strong>Developer tools</strong><small>{state.developer_tools_enabled ? 'Toggle with F12, Ctrl+Shift+I, or Cmd+Option+I. Press Escape to close.' : 'Enable the embedded inspector and its keyboard shortcuts.'}</small></div><div className="settings-tools-actions"><div className="segments"><button className={!state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: false }))}>Off</button><button className={state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: true }))}>On</button></div>{state.developer_tools_enabled && <button className="secondary" onClick={onToggleDeveloperTools}>{developerToolsOpen ? 'Close' : 'Open'}</button>}</div></section><section className="settings-section"><div><strong>Report a bug</strong><small>Send feedback with optional launch diagnostics and screenshots.</small></div><button className="secondary" onClick={onReportBug}><Bug /> Open</button></section><section className="settings-section"><div><strong>What’s new</strong><small>Read current and previous Impulse update notes.</small></div><button className="secondary" onClick={onNews}><History /> Open</button></section><section className="settings-section"><div><strong>Onboarding</strong><small>Replay the introduction to Impulse.</small></div><button className="secondary" onClick={onReplay}><Rocket /> Replay</button></section><footer className="settings-about"><span>Installed version</span><strong>{state.impulse_version}</strong></footer></div></div>;
+function StandaloneSettings({ state, busy, developerToolsOpen, onToggleDeveloperTools, onClose, onChange, onReplay, onMigrate, onEmergencyUpdate }: { state: State; busy: boolean; developerToolsOpen: boolean; onToggleDeveloperTools: () => void; onClose: () => void; onChange: (state: State) => void; onReplay: () => void; onMigrate: () => void; onEmergencyUpdate: () => void }) {
+  return <div className="modal-backdrop"><div className="modal settings-modal"><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">Impulse</span><h2>Settings</h2><p>Manage how this Impulse installation behaves.</p>{state.legacy_mode && <div className="legacy-notice"><History /><div><strong>Impulse standalone mode</strong><small>Connected features and automatic updates are disabled.</small></div></div>}{!state.legacy_mode && <section className="settings-section"><div><strong>Update channel</strong><small>Stable receives production releases. Beta also receives previews.</small></div><div className="segments">{(['stable', 'beta'] as const).map(channel => <button key={channel} className={state.update_channel === channel ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setUpdateChannel', { channel }))}>{channel}</button>)}</div></section>}<section className="settings-section"><div><strong>Developer tools</strong><small>{state.developer_tools_enabled ? 'Toggle with F12, Ctrl+Shift+I, or Cmd+Option+I. Press Escape to close.' : 'Enable the embedded inspector and its keyboard shortcuts.'}</small></div><div className="settings-tools-actions"><div className="segments"><button className={!state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: false }))}>Off</button><button className={state.developer_tools_enabled ? 'active' : ''} onClick={async () => onChange(await invoke<State>('setDeveloperTools', { enabled: true }))}>On</button></div>{state.developer_tools_enabled && <button className="secondary" onClick={onToggleDeveloperTools}>{developerToolsOpen ? 'Close' : 'Open'}</button>}</div></section>{state.legacy_mode && state.migration.migrate && <section className="settings-section migration-setting"><div><strong>Migrate now</strong><small>Move your existing servers and settings to Erozion Go.</small></div><button className="primary" onClick={onMigrate}><Rocket /> Open</button></section>}{state.legacy_mode && <section className="settings-section"><div><strong>Check for emergency update</strong><small>Manually check for an Impulse repair release if migration encounters a problem.</small></div><button className="secondary" disabled={busy} onClick={onEmergencyUpdate}><RefreshCw /> Check</button></section>}<section className="settings-section"><div><strong>Onboarding</strong><small>Replay the introduction to Impulse.</small></div><button className="secondary" onClick={onReplay}><Rocket /> Replay</button></section><footer className="settings-about"><span>Installed version</span><strong>{state.impulse_version}</strong></footer></div></div>;
 }
 
 function ServerRow({ profile, iconUrl, selected, onClick }: { profile: Profile; iconUrl?: string; selected: boolean; onClick: () => void }) {
@@ -614,8 +454,8 @@ function Overview({ manifest }: { manifest?: Manifest }) {
   return <div className="overview-grid"><section className="panel server-about"><span className="eyebrow">Server</span><h2>{manifest?.name || 'Minecraft Server'}</h2><p>{manifest?.description || 'This server is ready to be managed through Impulse.'}</p></section><section className="metric"><Package /><span>Required mods</span><strong>{required}</strong></section><section className="metric"><Settings2 /><span>Optional mods</span><strong>{optional}</strong></section><section className="metric wide"><ShieldCheck /><span>Compatibility</span><strong>{manifest ? 'Ready' : 'Refresh required'}</strong><small>{manifest ? `${manifest.minecraft?.loader || 'NeoForge'} ${manifest.minecraft?.loader_version || ''}` : 'Check this server to continue.'}</small></section></div>;
 }
 
-function Mods({ manifest, onOptional, onCustom }: { manifest?: Manifest; onOptional: () => void; onCustom: () => void }) {
-  return <div className="mods-view"><div className="section-heading"><div><span className="eyebrow">Profile content</span><h2>Mods</h2><p>Required additions are prepared automatically. Optional and personal additions stay under your control.</p></div><div className="heading-actions"><button className="secondary" onClick={onOptional}><Settings2 size={16} /> Optional mods</button><button className="primary" onClick={onCustom}><Plus size={16} /> Add custom mods</button></div></div><ModGroup title="Required" mods={manifest?.mods || []} /><ModGroup title="Optional" mods={manifest?.optional_mods || []} /></div>;
+function Mods({ manifest, onlineModsEnabled, onOptional, onCustom }: { manifest?: Manifest; onlineModsEnabled: boolean; onOptional: () => void; onCustom: () => void }) {
+  return <div className="mods-view"><div className="section-heading"><div><span className="eyebrow">Profile content</span><h2>Mods</h2><p>Required additions are prepared automatically. Optional and personal additions stay under your control.</p></div><div className="heading-actions"><button className="secondary" onClick={onOptional}><Settings2 size={16} /> Optional mods</button>{onlineModsEnabled && <button className="primary" onClick={onCustom}><Plus size={16} /> Add custom mods</button>}</div></div><ModGroup title="Required" mods={manifest?.mods || []} /><ModGroup title="Optional" mods={manifest?.optional_mods || []} /></div>;
 }
 
 function ModGroup({ title, mods }: { title: string; mods: Mod[] }) {
@@ -637,22 +477,6 @@ function AddServer({ address, setAddress, busy, error, onClose, onAdd }: { addre
 
 function Confirm({ title, text, confirm, destructive, onClose, onConfirm }: { title: string; text: string; confirm: string; destructive?: boolean; onClose: () => void; onConfirm: () => void }) {
   return <Modal><button className="modal-close" onClick={onClose}><X /></button><h2>{title}</h2><p>{text}</p><div className="modal-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className={destructive ? 'danger' : 'primary'} onClick={onConfirm}>{confirm}</button></div></Modal>;
-}
-
-const REPORT_CATEGORIES = [
-  ['malicious_files', 'Malicious or suspicious files'],
-  ['credential_theft', 'Credential theft or phishing'],
-  ['impersonation', 'Impersonation'],
-  ['fraud', 'Fraud or scam'],
-  ['abuse', 'Severe abusive activity'],
-  ['other_security', 'Other security concern'],
-] as const;
-
-function ReportServer({ profile, busy, onClose, onSubmit }: { profile: Profile; busy: boolean; onClose: () => void; onSubmit: (category: string, details: string) => void }) {
-  const [category, setCategory] = useState<string>(REPORT_CATEGORIES[0][0]);
-  const [details, setDetails] = useState('');
-  const valid = details.trim().length >= 20 && details.trim().length <= 2000;
-  return <Modal><button className="modal-close" onClick={onClose}><X /></button><span className="eyebrow">Impulse Security</span><h2>Report this server</h2><p>Tell Impulse about a security or safety concern. Reports are reviewed before any restriction is applied.</p><div className="report-target"><Server size={17} /><span><strong>{profile.name || 'Minecraft Server'}</strong><small>{profile.address}</small></span></div><label className="field"><span>Reason</span><select value={category} onChange={event => setCategory(event.target.value)}>{REPORT_CATEGORIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="field"><span>What happened?</span><textarea autoFocus value={details} maxLength={2000} onChange={event => setDetails(event.target.value)} placeholder="Describe what you observed and include enough detail for the report to be reviewed." /><small>{details.trim().length}/2000 · minimum 20 characters</small></label><div className="modal-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={busy || !valid} onClick={() => onSubmit(category, details.trim())}><Flag size={16} /> Submit report</button></div></Modal>;
 }
 
 function OptionalMods({ profile, manifest, onClose, onSave }: { profile: Profile; manifest: Manifest; onClose: () => void; onSave: (ids: string[]) => void }) {
